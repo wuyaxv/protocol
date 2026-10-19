@@ -27,34 +27,63 @@ The ASCII output is byte-for-byte compatible with the original Python tool
 
 ## Table of contents
 
-* [Features](#features)
-* [Building](#building)
-  * [Prerequisites](#prerequisites)
-  * [Quick build](#quick-build)
-  * [macOS](#macos)
-  * [Debian / Ubuntu](#debian--ubuntu)
-  * [Fedora / RHEL / CentOS](#fedora--rhel--centos)
-  * [Arch Linux](#arch-linux)
-  * [Windows](#windows)
-  * [Build types](#build-types)
-  * [Installing](#installing)
-  * [Building without CMake](#building-without-cmake)
-  * [Verifying the build](#verifying-the-build)
-* [Usage](#usage)
-  * [Command-line syntax](#command-line-syntax)
-  * [Option reference](#option-reference)
-  * [Displaying built-in protocols](#displaying-built-in-protocols)
-  * [Built-in protocols](#built-in-protocols)
-  * [Custom protocol specifications](#custom-protocol-specifications)
-  * [Reading specs from a file](#reading-specs-from-a-file)
-  * [Output formats](#output-formats)
-  * [Color themes](#color-themes)
-  * [Exit status](#exit-status)
-* [Examples](#examples)
-* [Project layout](#project-layout)
-* [Testing](#testing)
-* [Third-party components](#third-party-components)
-* [License](#license)
+- [protocol (C++ edition)](#protocol-c-edition)
+  - [Table of contents](#table-of-contents)
+  - [Features](#features)
+  - [Building](#building)
+    - [Prerequisites](#prerequisites)
+    - [Quick build](#quick-build)
+    - [macOS](#macos)
+    - [Debian / Ubuntu](#debian--ubuntu)
+    - [Fedora / RHEL / CentOS](#fedora--rhel--centos)
+    - [Arch Linux](#arch-linux)
+    - [Windows](#windows)
+    - [Build types](#build-types)
+    - [Installing](#installing)
+    - [Building without CMake](#building-without-cmake)
+    - [Verifying the build](#verifying-the-build)
+  - [Usage](#usage)
+    - [Command-line syntax](#command-line-syntax)
+    - [Option reference](#option-reference)
+    - [Displaying built-in protocols](#displaying-built-in-protocols)
+    - [Built-in protocols](#built-in-protocols)
+    - [Custom protocol specifications](#custom-protocol-specifications)
+    - [Reading specs from a file](#reading-specs-from-a-file)
+    - [Output formats](#output-formats)
+    - [Color themes](#color-themes)
+    - [Exit status](#exit-status)
+  - [Examples](#examples)
+  - [Project layout](#project-layout)
+  - [Testing](#testing)
+  - [Third-party components](#third-party-components)
+  - [License](#license)
+- [中文文档](#中文文档)
+  - [目录](#目录)
+  - [功能特性](#功能特性)
+  - [编译安装](#编译安装)
+    - [环境要求](#环境要求)
+    - [快速构建（Unix 通用）](#快速构建unix-通用)
+    - [macOS](#macos-1)
+    - [Debian / Ubuntu](#debian--ubuntu-1)
+    - [Fedora / RHEL / CentOS](#fedora--rhel--centos-1)
+    - [Arch Linux](#arch-linux-1)
+    - [Windows](#windows-1)
+    - [构建类型](#构建类型)
+    - [安装到系统](#安装到系统)
+    - [不用 CMake 直接编译](#不用-cmake-直接编译)
+    - [验证构建](#验证构建)
+  - [使用方法](#使用方法)
+    - [命令语法](#命令语法)
+    - [选项一览](#选项一览)
+    - [显示内置协议](#显示内置协议)
+    - [内置协议列表](#内置协议列表)
+    - [自定义协议规格](#自定义协议规格)
+    - [从文件读取规格](#从文件读取规格)
+    - [输出格式](#输出格式)
+    - [颜色主题](#颜色主题)
+    - [退出状态码](#退出状态码)
+  - [命令示例](#命令示例)
+  - [许可证](#许可证)
 
 ## Features
 
@@ -1006,46 +1035,6 @@ protocol -f my_protocols.txt -o all.svg --theme forest
 protocol et              # 等价于 protocol ethernet
 protocol s7_h            # 等价于 protocol s7_header
 ```
-
-## 项目结构
-
-```
-protocol/
-├── CMakeLists.txt          # CMake 构建定义（C++17，零依赖）
-├── README.md               # 本文档
-├── LICENSE.txt             # GNU GPL v3
-├── src/
-│   ├── main.cpp            # 命令行接口
-│   ├── protocol.hpp/.cpp   # 核心布局引擎（规格解析、图表网格）
-│   ├── specs.hpp/.cpp      # 40 个内置协议规格
-│   ├── theme.hpp/.cpp      # 颜色主题定义
-│   ├── border_lines.hpp    # 边框字符 -> 连续线段
-│   ├── render_text.hpp/.cpp    # ASCII / ANSI 真彩色渲染器
-│   ├── render_svg.hpp/.cpp     # SVG 渲染器
-│   └── render_png.hpp/.cpp     # PNG 渲染器（内嵌 8x8 点阵字体）
-├── third_party/
-│   ├── stb_image_write.h   # PNG 编码器（public domain）
-│   ├── font8x8_basic.h     # 8x8 点阵字体（public domain）
-│   └── README.md           # 第三方组件声明
-├── tests/
-│   ├── run_tests.sh        # 回归测试脚本
-│   └── golden/*.txt        # 黄金输出（由原 Python 工具生成）
-└── examples/               # 本工具生成的示例图片
-```
-
-## 测试
-
-```sh
-./tests/run_tests.sh        # 或：ctest --test-dir build --output-on-failure
-```
-
-测试内容：
-
-1. 将本 C++ 实现的 ASCII 输出与原 Python 工具生成的黄金文件逐字节比对——
-   覆盖全部 40 个内置协议及各种边界情况（自定义每行比特数、自定义边框字符、
-   跨行字段、隐藏比特序号、多协议同时输出）。
-2. SVG 输出健全性检查（文档格式合法）与 PNG 输出检查（魔数）。
-3. 非法规格必须以退出码 1 失败。
 
 ## 许可证
 
