@@ -1424,56 +1424,6 @@ protocol ip -o ip_dark.svg --fg '#00ff88' --bg '#101010'
 protocol --list-colors
 ```
 
-## 项目结构
-
-```
-protocol/
-├── CMakeLists.txt          # CMake 构建定义（C++17，零依赖）
-├── README.md               # 本文档
-├── LICENSE.txt             # GNU GPL v3
-├── src/
-│   ├── main.cpp            # 命令行接口
-│   ├── protocol.hpp/.cpp   # 核心布局引擎（规格解析、转义、变长、指针）
-│   ├── specs.hpp/.cpp      # 40 个内置协议规格
-│   ├── theme.hpp/.cpp      # 颜色主题定义
-│   ├── border_lines.hpp    # 边框字符 -> 连续线段（含 '~' 虚线）
-│   ├── render_text.hpp/.cpp    # ASCII / ANSI 真彩色渲染器
-│   ├── render_svg.hpp/.cpp     # SVG 渲染器
-│   ├── render_png.hpp/.cpp     # PNG 渲染器
-│   └── font.hpp/.cpp           # 字体加载（系统 TTF + 内嵌 8x8 回退）
-├── third_party/
-│   ├── stb_image_write.h   # PNG 编码器（public domain）
-│   ├── stb_truetype.h      # TrueType 字体栅格化（public domain）
-│   ├── font8x8_basic.h     # 8x8 点阵回退字体（public domain）
-│   └── README.md           # 第三方组件声明
-├── tests/
-│   ├── test_unit.cpp       # 无框架单元测试（核心库）
-│   ├── run_tests.sh        # 黄金/集成测试脚本
-│   └── golden/*.txt        # 黄金输出（原 Python 工具 + 新特性）
-└── examples/               # 本工具生成的示例图片
-```
-
-## 测试
-
-```sh
-./build/protocol_unit_tests     # 单元测试
-./tests/run_tests.sh            # 黄金/集成测试
-ctest --test-dir build --output-on-failure   # 通过 CTest 运行两者
-```
-
-测试内容：
-
-1. **单元测试**（`tests/test_unit.cpp`，无框架）：转义分割/还原、变长字段解析与布局、
-   指针规格解析、指针定位（行号、字段名、钳位、标签合并、对齐、深入行内的折线
-   路由）、颜色解析（颜色名/十六进制）、字体处理、渲染模式与网格辅助函数，约 165 项检查。
-2. **黄金/集成测试**（`tests/run_tests.sh`）：ASCII 输出与黄金文件逐字节比对——
-   覆盖全部 40 个内置协议及由原 Python 工具生成的边界用例，以及新特性的黄金文件
-   （变长字段、指针箭头、转义）。还包括：SVG 健全性（格式合法、虚线、指针标签、
-   ASCII 模式、`--no-fill`、字体栈）、PNG 健全性（魔数，含指针/虚线/ASCII 模式/
-   显式字体加载）、指针钳位警告、错误处理（非法规格必须以退出码 1 失败）。
-
 ## 许可证
 
-GNU GPL v3（见 `LICENSE.txt`），与原项目一致。原始作品 (c) 2014 Luis MartinGarcia，
-本 C++ 重写版按相同许可证发布。`third_party/` 内组件为 public domain，
-详见 `third_party/README.md`。
+GNU GPL v3
