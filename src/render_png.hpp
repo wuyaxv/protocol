@@ -18,13 +18,17 @@
 namespace protocol {
 
 struct PngOptions {
-    int scale = 2;          ///< Pixel scale of one character cell (1..8)
+    int scale = 2;            ///< Pixel scale of the diagram (1..8)
     bool transparent = false; ///< Transparent canvas background
+    bool ascii = false;       ///< Render characters literally (terminal look)
+    std::string font_path;    ///< TrueType font file; empty = auto-detect
+    bool force_bitmap = false; ///< Force the embedded bitmap font (testing hook)
 };
 
 /**
  * Renders one or more protocol grids (stacked vertically) and returns the
  * encoded PNG file bytes. Returns an empty vector on failure.
+ * @throw std::runtime_error if an explicitly requested font cannot be loaded.
  */
 std::vector<std::uint8_t> render_png(const std::vector<Grid>& grids, const Theme& theme,
                                      const PngOptions& opts = PngOptions{});

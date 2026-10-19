@@ -61,6 +61,8 @@ for f in "$GOLDEN_DIR"/*.txt; do
         __escape_sepchar)      check_ascii "$name" 'A:8,B:8?bits=16,sepchar=\,' ;;
         __pointer_row)         check_ascii "$name" tcp --pointer 'Pointer@3' ;;
         __pointer_field)       check_ascii "$name" udp --pointer 'Len@length' ;;
+        __pointer_elbow)       check_ascii "$name" udp --pointer 'SP@Source Port' --pointer 'Ck@Checksum' ;;
+        __pointer_elbow_mixed) check_ascii "$name" tcp --pointer 'Top@1' --pointer 'Fl@Flags' ;;
         __pointer_clamp)       check_ascii "$name" udp --pointer 'End@99' ;;
         __pointer_merge)       check_ascii "$name" udp --pointer 'A@1' --pointer 'B@1' --pointer 'C@2' ;;
         __pointer_specopt)     check_ascii "$name" 'Type:8,Data:16,Code:8?pointer=Ptr@Data' ;;
@@ -87,12 +89,112 @@ else
     fail=$((fail + 1))
     echo "FAIL: svg variable-length dashed edges"
 fi
+# Dashed edges use a gap larger than the dash (dash cell_h/6, gap cell_h/4).
+dash_pair="$(printf '%s' "$svg_varlen" | grep -o 'stroke-dasharray="[0-9.]* [0-9.]*"' | head -1)"
+dash_len="${dash_pair#*\"}"; dash_len="${dash_len%% *}"
+gap_len="${dash_pair##* }"; gap_len="${gap_len%\"}"
+if [ -n "$dash_len" ] && [ -n "$gap_len" ] && \
+   [ "$(awk "BEGIN{print ($gap_len > $dash_len) ? 1 : 0}")" == "1" ]; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: dashed gap should exceed dash length (got '$dash_pair')"
+fi
 svg_ptr="$("$BIN" tcp --format svg --pointer 'Pointer@3')"
 if printf '%s' "$svg_ptr" | grep -q '>Pointer<' && printf '%s' "$svg_ptr" | grep -q '</svg>'; then
     pass=$((pass + 1))
 else
     fail=$((fail + 1))
     echo "FAIL: svg pointer rendering"
+fi
+# Elbow arrows in SVG: arrowhead '^' and corner '+' rendered as pointer glyphs.
+svg_elbow="$("$BIN" udp --format svg --pointer 'Ck@Checksum')"
+if printf '%s' "$svg_elbow" | grep -q '>\^<' && printf '%s' "$svg_elbow" | grep -q '>Ck<'; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: svg elbow pointer rendering"
+fi
+
+# SVG ASCII mode: borders are emitted as text characters, not line rects.
+svg_ascii="$("$BIN" udp --format svg --ascii)"
+if printf '%s' "$svg_ascii" | grep -q '>[-+]*<' && \
+   ! printf '%s' "$svg_ascii" | grep -q 'stroke-dasharray'; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: svg ascii mode"
+fi
+
+# SVG with --no-fill and --transparent and --ascii: no <rect> elements at all.
+svg_nofill="$("$BIN" udp --format svg --no-fill --transparent --ascii)"
+if printf '%s' "$svg_nofill" | grep -q '<rect'; then
+    fail=$((fail + 1))
+    echo "FAIL: svg --no-fill --transparent --ascii should have no <rect>"
+else
+    pass=$((pass + 1))
+fi
+
+# SVG default font stack is modern; --font-family is prepended.
+svg_ff="$("$BIN" udp --format svg --font-family 'My Mono')"
+if printf '%s' "$svg_ff" | grep -q "font-family=\"'My Mono','JetBrains Mono'"; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: svg font stack"
+fi
+
+# --fg recolors all ink; --bg recolors the canvas; hex and names both work.
+svg_fg="$("$BIN" udp --format svg --transparent --fg white)"
+if printf '%s' "$svg_fg" | grep -q 'fill="#ffffff"' && \
+   ! printf '%s' "$svg_fg" | grep -q '<rect x="0"'; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: --fg white with --transparent"
+fi
+svg_hex="$("$BIN" udp --format svg --fg '#00ff88' --bg '#101010')"
+if printf '%s' "$svg_hex" | grep -q 'fill="#00ff88"' && \
+   printf '%s' "$svg_hex" | grep -q 'fill="#101010"'; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: --fg/--bg hex colors"
+fi
+png_fg="$("$BIN" udp --format png --transparent --fg white --no-fill | head -c 8 | od -An -tx1 | tr -d ' \n')"
+if [ "$png_fg" == "89504e470d0a1a0a" ]; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: png --fg white (got $png_fg)"
+fi
+ansi_fg="$("$BIN" udp --fg lime --color always)"
+if printf '%s' "$ansi_fg" | grep -q '38;2;0;255;0'; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: ansi --fg lime"
+fi
+if "$BIN" udp --fg notacolor >/dev/null 2>&1; then
+    fail=$((fail + 1))
+    echo "FAIL: --fg with unknown color must fail"
+else
+    pass=$((pass + 1))
+fi
+if "$BIN" --list-colors | grep -q white; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: --list-colors"
+fi
+
+# ANSI text output with --no-fill must not emit background colors.
+ansi_nofill="$("$BIN" udp --theme dark --color always --no-fill)"
+if printf '%s' "$ansi_nofill" | grep -q '48;2;'; then
+    fail=$((fail + 1))
+    echo "FAIL: ansi --no-fill should have no background colors"
+else
+    pass=$((pass + 1))
 fi
 
 # PNG sanity: magic bytes.
@@ -111,6 +213,40 @@ if [ "$png_feat" == "89504e470d0a1a0a" ]; then
 else
     fail=$((fail + 1))
     echo "FAIL: png with pointer/varlen (got $png_feat)"
+fi
+
+# PNG ASCII mode (terminal look) with no-fill.
+png_ascii="$("$BIN" udp --format png --ascii --no-fill | head -c 8 | od -An -tx1 | tr -d ' \n')"
+if [ "$png_ascii" == "89504e470d0a1a0a" ]; then
+    pass=$((pass + 1))
+else
+    fail=$((fail + 1))
+    echo "FAIL: png ascii mode (got $png_ascii)"
+fi
+
+# An explicit missing font file must fail; a real one must work (if present).
+if "$BIN" udp --font /nonexistent/font.ttf --format png >/dev/null 2>&1; then
+    fail=$((fail + 1))
+    echo "FAIL: --font with a missing file must fail"
+else
+    pass=$((pass + 1))
+fi
+SYSFONT=""
+for c in /System/Library/Fonts/Menlo.ttc /System/Library/Fonts/SFNSMono.ttf \
+         /usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf \
+         "C:/Windows/Fonts/consola.ttf"; do
+    [ -f "$c" ] && SYSFONT="$c" && break
+done
+if [ -n "$SYSFONT" ]; then
+    png_ttf="$("$BIN" udp --format png --font "$SYSFONT" | head -c 8 | od -An -tx1 | tr -d ' \n')"
+    if [ "$png_ttf" == "89504e470d0a1a0a" ]; then
+        pass=$((pass + 1))
+    else
+        fail=$((fail + 1))
+        echo "FAIL: png with --font $SYSFONT"
+    fi
+else
+    echo "SKIP: no known system font found for the --font test"
 fi
 
 # Pointer clamping emits a warning on stderr but succeeds.

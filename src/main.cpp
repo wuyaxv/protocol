@@ -41,7 +41,7 @@
 namespace {
 
 const char* APPLICATION_NAME = "Protocol";
-const char* APPLICATION_VERSION = "1.1.0";
+const char* APPLICATION_VERSION = "1.2.0";
 
 enum class OutputFormat { Text, Svg, Png };
 enum class ColorMode { Auto, Always, Never };
@@ -63,6 +63,14 @@ struct Options {
     bool transparent = false;
     ColorMode color_mode = ColorMode::Auto;
     std::vector<protocol::Pointer> pointers; // pointer arrows (repeatable)
+    bool no_fill = false;      // transparent field backgrounds
+    bool ascii = false;        // literal character rendering for SVG/PNG
+    std::string font_path;     // PNG: TrueType font file (empty = auto-detect)
+    std::string font_family;   // SVG: preferred font family
+    protocol::Color fg;        // global foreground color override
+    bool fg_set = false;
+    protocol::Color bg;        // canvas background color override
+    bool bg_set = false;
 };
 
 void display_usage(const char* prog) {
@@ -91,11 +99,22 @@ void display_help(const char* prog) {
     std::printf(" -o, --output <file> : Write output to a file (.txt, .svg or .png)\n");
     std::printf("     --format <fmt>  : Output format: text, svg or png (default: text)\n");
     std::printf(" -t, --theme <name>  : Color theme (default: none for text, light for svg/png)\n");
+    std::printf("     --fg <color>    : Global foreground color (borders, numbers, labels,\n");
+    std::printf("                       pointers): a color name (see --list-colors) or #RGB/#RRGGBB\n");
+    std::printf("     --bg <color>    : Canvas background color (PNG/SVG); same color syntax\n");
+    std::printf("     --list-colors   : List available color names\n");
     std::printf("     --color <mode>  : ANSI colors for terminal text output: auto, always, never\n");
     std::printf("     --pointer <l@t> : Draw a pointer arrow: label @ row number or field name\n");
-    std::printf("                       (repeatable; rows count field lines starting at 1)\n");
+    std::printf("                       (repeatable; row numbers give a row-start arrow, field\n");
+    std::printf("                       names draw an elbow arrow pointing at the field itself)\n");
     std::printf("     --scale <n>     : PNG pixel scale, from 1 to 8 (default: 2)\n");
     std::printf("     --transparent   : Transparent canvas background for PNG/SVG output\n");
+    std::printf("     --no-fill       : Transparent field backgrounds (no field fill colors)\n");
+    std::printf("     --ascii         : Render SVG/PNG exactly like the terminal ASCII output\n");
+    std::printf("                       (characters as glyphs instead of line primitives)\n");
+    std::printf("     --font <file>   : PNG: TrueType font file (default: auto-detected modern\n");
+    std::printf("                       monospace font, falling back to the embedded 8x8 font)\n");
+    std::printf("     --font-family <name> : SVG: preferred font family (default: modern stack)\n");
     std::printf("     --list          : List built-in protocols\n");
     std::printf("     --list-themes   : List available color themes\n");
     std::printf(" --evenchar  <char>  : Character for the even positions of horizontal table borders\n");
@@ -242,6 +261,35 @@ void parse_cmd_line_args(int argc, char** argv, Options& opts) {
                 fatal(std::string("Invalid PNG scale supplied (") + v + "), use a value 1-8");
         } else if (arg == "--transparent") {
             opts.transparent = true;
+        } else if (arg == "--no-fill") {
+            opts.no_fill = true;
+        } else if (arg == "--ascii") {
+            opts.ascii = true;
+        } else if (arg == "--font") {
+            opts.font_path = need_param(arg.c_str());
+        } else if (arg == "--font-family") {
+            opts.font_family = need_param(arg.c_str());
+        } else if (arg == "--fg") {
+            const char* v = need_param(arg.c_str());
+            if (!protocol::parse_color(v, opts.fg))
+                fatal(std::string("Invalid color '") + v +
+                      "'. Use a color name (see --list-colors) or #RGB/#RRGGBB.");
+            opts.fg_set = true;
+        } else if (arg == "--bg") {
+            const char* v = need_param(arg.c_str());
+            if (!protocol::parse_color(v, opts.bg))
+                fatal(std::string("Invalid color '") + v +
+                      "'. Use a color name (see --list-colors) or #RGB/#RRGGBB.");
+            opts.bg_set = true;
+        } else if (arg == "--list-colors") {
+            std::printf("Available color names (or use #RGB / #RRGGBB):\n");
+            int col = 0;
+            for (const std::string& n : protocol::color_names()) {
+                std::printf("  %-12s", n.c_str());
+                if (++col % 5 == 0) std::printf("\n");
+            }
+            if (col % 5 != 0) std::printf("\n");
+            std::exit(0);
         } else if (arg == "--pointer") {
             const char* v = need_param(arg.c_str());
             try {
@@ -365,6 +413,15 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Global color overrides: --fg recolors all ink (borders, numbers, field
+    // labels, pointer arrows); --bg recolors the canvas background.
+    protocol::Theme themed = *theme;
+    if (opts.fg_set) {
+        themed.border = themed.numbers = themed.text = themed.pointer = opts.fg;
+    }
+    if (opts.bg_set) themed.background = opts.bg;
+    theme = &themed;
+
     // Lay out every protocol (this resolves pointer annotations; out-of-range
     // row numbers are clamped with a warning, unknown field names are fatal).
     std::vector<protocol::Grid> grids;
@@ -381,11 +438,13 @@ int main(int argc, char** argv) {
     // Align stacked diagrams that have different pointer margins.
     int max_margin = 0;
     for (const auto& g : grids) max_margin = std::max(max_margin, g.left_margin);
-    for (auto& g : grids)
+    for (auto& g : grids) {
         if (g.left_margin < max_margin) protocol::pad_grid_left(g, max_margin - g.left_margin);
+        if (opts.no_fill) g.fill_fields = false; // CLI overrides the spec's fill=
+    }
 
     if (format == OutputFormat::Text) {
-        bool use_color = theme->name != "none" &&
+        bool use_color = (theme->name != "none" || opts.fg_set) &&
                          (opts.color_mode == ColorMode::Always ||
                           (opts.color_mode == ColorMode::Auto && opts.output_file.empty() &&
                            isatty(fileno(stdout))));
@@ -413,6 +472,8 @@ int main(int argc, char** argv) {
     if (format == OutputFormat::Svg) {
         protocol::SvgOptions svg_opts;
         svg_opts.transparent = opts.transparent;
+        svg_opts.ascii = opts.ascii;
+        svg_opts.font_family = opts.font_family;
         std::string svg = protocol::render_svg(grids, *theme, svg_opts);
         if (!opts.output_file.empty()) {
             if (!write_text(opts.output_file, svg)) {
@@ -430,7 +491,15 @@ int main(int argc, char** argv) {
     protocol::PngOptions png_opts;
     png_opts.scale = opts.scale;
     png_opts.transparent = opts.transparent;
-    std::vector<std::uint8_t> png = protocol::render_png(grids, *theme, png_opts);
+    png_opts.ascii = opts.ascii;
+    png_opts.font_path = opts.font_path;
+    std::vector<std::uint8_t> png;
+    try {
+        png = protocol::render_png(grids, *theme, png_opts);
+    } catch (const std::runtime_error& ex) {
+        std::fprintf(stderr, "ERROR: %s\n", ex.what());
+        return 1;
+    }
     if (png.empty()) {
         std::fprintf(stderr, "ERROR: Failed to encode PNG image\n");
         return 1;

@@ -57,6 +57,16 @@ const Theme* find_theme(const std::string& name);
 /** Computes a readable text color (black or white) over the given background. */
 Color contrast_text(Color bg);
 
+/**
+ * Parses a color given either as a well-known name (case-insensitive, e.g.
+ * "white", "tomato", "slategray"; aliases like grey/aqua/fuchsia included)
+ * or as hexadecimal "#RGB" / "#RRGGBB". Returns false on unknown input.
+ */
+bool parse_color(const std::string& s, Color& out);
+
+/** Returns the supported color names (sorted), for --list-colors. */
+std::vector<std::string> color_names();
+
 } // namespace protocol
 
 #endif // PROTOCOL_THEME_HPP

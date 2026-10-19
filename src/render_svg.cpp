@@ -50,6 +50,21 @@ Color fg_for(const Cell& cell, const Theme& theme, bool& visible) {
     }
 }
 
+/** Quotes a font family name if it contains spaces. */
+std::string quote_family(const std::string& name) {
+    if (name.find(' ') != std::string::npos && name.front() != '\'') return "'" + name + "'";
+    return name;
+}
+
+/** Modern monospace font stack for SVG output (viewer-resolved). */
+std::string font_stack(const std::string& preferred) {
+    std::string stack;
+    if (!preferred.empty()) stack += quote_family(preferred) + ",";
+    stack += "'JetBrains Mono','Fira Code','Cascadia Code',ui-monospace,"
+             "SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace";
+    return stack;
+}
+
 } // namespace
 
 std::string render_svg(const std::vector<Grid>& grids, const Theme& theme, const SvgOptions& opts) {
@@ -78,7 +93,7 @@ std::string render_svg(const std::vector<Grid>& grids, const Theme& theme, const
         svg += "<rect x=\"0\" y=\"0\" width=\"" + fmt(width) + "\" height=\"" + fmt(height) +
                "\" fill=\"" + theme.background.to_hex() + "\"/>\n";
     }
-    svg += "<g font-family=\"ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace\""
+    svg += "<g font-family=\"" + font_stack(opts.font_family) + "\""
            " font-size=\"" + fmt(opts.font_size) + "\" text-anchor=\"middle\" xml:space=\"preserve\">\n";
 
     double y_off = pad_y;
@@ -86,9 +101,9 @@ std::string render_svg(const std::vector<Grid>& grids, const Theme& theme, const
         for (std::size_t r = 0; r < grid.rows.size(); ++r) {
             const auto& row = grid.rows[r];
             // 1. Field background rectangles (merge contiguous cells of the
-            //    same field).
+            //    same field); skipped when field fills are disabled.
             std::size_t col = 0;
-            while (col < row.size()) {
+            while (grid.fill_fields && col < row.size()) {
                 const Cell& c = row[col];
                 bool is_field = (c.role == Role::FieldBg || c.role == Role::FieldText);
                 if (!is_field) { ++col; continue; }
@@ -105,9 +120,11 @@ std::string render_svg(const std::vector<Grid>& grids, const Theme& theme, const
             }
             // 2. Border characters '+', '-' and '|' are drawn as continuous
             //    line primitives so boxes are perfectly closed (font glyphs
-            //    would leave gaps between character rows).
+            //    would leave gaps between character rows). In ASCII mode all
+            //    characters are rendered literally as text instead.
             const double lw = opts.font_size * 0.085; // line width
             const std::string border_hex = theme.border.to_hex();
+            if (!opts.ascii) {
             // 2a. Horizontal segments, merged into runs.
             col = 0;
             while (col < row.size()) {
@@ -127,24 +144,29 @@ std::string render_svg(const std::vector<Grid>& grids, const Theme& theme, const
                 double y0 = seg.vline_up ? y_off : y_off + cell_h / 2;
                 double y1 = seg.vline_down ? y_off + cell_h : y_off + cell_h / 2;
                 if (seg.dashed) {
+                    // Slightly wider gap between dashes than the dash itself.
                     std::string dash = fmt(cell_h / 6);
+                    std::string gap = fmt(cell_h / 4);
                     svg += "<line x1=\"" + fmt(cx) + "\" y1=\"" + fmt(y0) + "\" x2=\"" + fmt(cx) +
                            "\" y2=\"" + fmt(y1) + "\" stroke=\"" + border_hex +
                            "\" stroke-width=\"" + fmt(lw) + "\" stroke-dasharray=\"" + dash +
-                           " " + dash + "\"/>\n";
+                           " " + gap + "\"/>\n";
                 } else {
                     svg += "<rect x=\"" + fmt(cx - lw / 2) + "\" y=\"" + fmt(y0) +
                            "\" width=\"" + fmt(lw) + "\" height=\"" + fmt(y1 - y0) +
                            "\" fill=\"" + border_hex + "\"/>\n";
                 }
             }
+            } // !opts.ascii
             // 3. Text runs (merge contiguous visible characters of the same
             //    color; each glyph gets an explicit x so alignment does not
-            //    depend on the viewer's font metrics).
+            //    depend on the viewer's font metrics). In ASCII mode border
+            //    characters are emitted as text too.
             col = 0;
             while (col < row.size()) {
                 const Cell& cc = row[col];
-                bool line_primitive = border_segments(grid.rows, r, col).any();
+                bool line_primitive =
+                    !opts.ascii && border_segments(grid.rows, r, col).any();
                 bool visible = false;
                 Color color = fg_for(cc, theme, visible);
                 if (!visible || cc.ch == ' ' || line_primitive) { ++col; continue; }
@@ -152,7 +174,8 @@ std::string render_svg(const std::vector<Grid>& grids, const Theme& theme, const
                 while (col < row.size()) {
                     bool vis2 = false;
                     Color c2 = fg_for(row[col], theme, vis2);
-                    bool lp2 = border_segments(grid.rows, r, col).any();
+                    bool lp2 =
+                        !opts.ascii && border_segments(grid.rows, r, col).any();
                     if (!vis2 || row[col].ch == ' ' || lp2 || c2.r != color.r ||
                         c2.g != color.g || c2.b != color.b)
                         break;

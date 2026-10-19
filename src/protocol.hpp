@@ -56,6 +56,7 @@ struct Grid {
     std::vector<std::vector<Cell>> rows;
     int left_margin = 0;                 ///< Cells reserved on the left (pointer arrows)
     std::vector<std::string> warnings;   ///< Non-fatal issues found during layout
+    bool fill_fields = true;             ///< Draw field background fills
 
     /** Width of the widest row, in cells. */
     std::size_t width() const {
@@ -125,6 +126,9 @@ class Protocol {
     /** Pointer annotations to draw on the left of the diagram. Populated
      *  from the spec's `pointer=` options and/or from the command line. */
     std::vector<Pointer> pointers;
+
+    /** Draw field background fills (spec option `fill=n` disables). */
+    bool fill_fields = true;
 
     /**
      * Lays the protocol out into an annotated character grid.

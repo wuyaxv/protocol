@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(protocol VERSION 1.1.0 LANGUAGES CXX)
+project(protocol VERSION 1.2.0 LANGUAGES CXX)
 
 # protocol - A simple header generator for network protocols (C++ edition)
 # RFC-like ASCII diagrams + SVG/PNG images with color themes.
@@ -20,6 +20,7 @@ add_library(protocol_core STATIC
   src/render_text.cpp
   src/render_svg.cpp
   src/render_png.cpp
+  src/font.cpp
 )
 target_include_directories(protocol_core PUBLIC src)
 target_include_directories(protocol_core SYSTEM PUBLIC third_party)
@@ -30,9 +31,10 @@ else()
   target_compile_options(protocol_core PRIVATE -Wall -Wextra)
 endif()
 
-# stb_image_write is not guaranteed to work with strict-aliasing optimizations.
+# The bundled stb libraries are not guaranteed to work with strict-aliasing
+# optimizations.
 if(NOT MSVC)
-  set_source_files_properties(src/render_png.cpp PROPERTIES
+  set_source_files_properties(src/render_png.cpp src/font.cpp PROPERTIES
     COMPILE_OPTIONS "-fno-strict-aliasing")
 endif()
 

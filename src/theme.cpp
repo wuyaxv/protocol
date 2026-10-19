@@ -147,4 +147,91 @@ const Theme* find_theme(const std::string& name) {
     return nullptr;
 }
 
+namespace {
+
+/** Well-known color names (standard CSS named colors) with hex values. */
+const std::pair<const char*, std::uint32_t> NAMED_COLORS[] = {
+    {"aliceblue", 0xf0f8ff}, {"aqua", 0x00ffff},    {"aquamarine", 0x7fffd4},
+    {"beige", 0xf5f5dc},     {"black", 0x000000},   {"blue", 0x0000ff},
+    {"brown", 0xa52a2a},     {"chartreuse", 0x7fff00}, {"chocolate", 0xd2691e},
+    {"coral", 0xff7f50},     {"crimson", 0xdc143c}, {"cyan", 0x00ffff},
+    {"darkgray", 0xa9a9a9},  {"deeppink", 0xff1493}, {"dimgray", 0x696969},
+    {"dodgerblue", 0x1e90ff}, {"forestgreen", 0x228b22}, {"fuchsia", 0xff00ff},
+    {"gainsboro", 0xdcdcdc}, {"ghostwhite", 0xf8f8ff}, {"gold", 0xffd700},
+    {"gray", 0x808080},      {"green", 0x008000},   {"grey", 0x808080},
+    {"hotpink", 0xff69b4},   {"indigo", 0x4b0082},  {"ivory", 0xfffff0},
+    {"khaki", 0xf0e68c},     {"lavender", 0xe6e6fa}, {"lightgray", 0xd3d3d3},
+    {"lime", 0x00ff00},      {"magenta", 0xff00ff}, {"maroon", 0x800000},
+    {"mintcream", 0xf5fffa}, {"navy", 0x000080},    {"olive", 0x808000},
+    {"orange", 0xffa500},    {"pink", 0xffc0cb},    {"purple", 0x800080},
+    {"red", 0xff0000},       {"royalblue", 0x4169e1}, {"salmon", 0xfa8072},
+    {"seagreen", 0x2e8b57},  {"sienna", 0xa0522d},  {"silver", 0xc0c0c0},
+    {"skyblue", 0x87ceeb},   {"slategray", 0x708090}, {"snow", 0xfffafa},
+    {"steelblue", 0x4682b4}, {"teal", 0x008080},    {"tomato", 0xff6347},
+    {"turquoise", 0x40e0d0}, {"violet", 0xee82ee},  {"white", 0xffffff},
+    {"whitesmoke", 0xf5f5f5}, {"yellow", 0xffff00},
+};
+
+int hex_digit(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+} // namespace
+
+bool parse_color(const std::string& raw, Color& out) {
+    // Trim whitespace.
+    std::size_t b = raw.find_first_not_of(" \t\n\r");
+    if (b == std::string::npos) return false;
+    std::string s = raw.substr(b, raw.find_last_not_of(" \t\n\r") - b + 1);
+    if (s.empty()) return false;
+
+    if (s.front() == '#') {
+        // Hexadecimal: #RGB or #RRGGBB.
+        std::string hex = s.substr(1);
+        if (hex.size() == 3) {
+            int r = hex_digit(hex[0]), g = hex_digit(hex[1]), bl = hex_digit(hex[2]);
+            if (r < 0 || g < 0 || bl < 0) return false;
+            out = Color{static_cast<std::uint8_t>(r * 17), static_cast<std::uint8_t>(g * 17),
+                        static_cast<std::uint8_t>(bl * 17), 255};
+            return true;
+        }
+        if (hex.size() == 6) {
+            int v[6];
+            for (int i = 0; i < 6; ++i) {
+                v[i] = hex_digit(hex[i]);
+                if (v[i] < 0) return false;
+            }
+            out = Color{static_cast<std::uint8_t>(v[0] * 16 + v[1]),
+                        static_cast<std::uint8_t>(v[2] * 16 + v[3]),
+                        static_cast<std::uint8_t>(v[4] * 16 + v[5]), 255};
+            return true;
+        }
+        return false;
+    }
+
+    // Named color (case-insensitive).
+    std::string lower = s;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    for (const auto& nc : NAMED_COLORS) {
+        if (lower == nc.first) {
+            out = Color{static_cast<std::uint8_t>((nc.second >> 16) & 0xff),
+                        static_cast<std::uint8_t>((nc.second >> 8) & 0xff),
+                        static_cast<std::uint8_t>(nc.second & 0xff), 255};
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> color_names() {
+    std::vector<std::string> names;
+    for (const auto& nc : NAMED_COLORS) names.push_back(nc.first);
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
 } // namespace protocol

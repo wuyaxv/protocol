@@ -115,9 +115,10 @@ The ASCII output is byte-for-byte compatible with the original Python tool
 * Field names may contain special characters via **backslash escapes**
   (`\,`, `\:`, `\?`, `\\`, ...).
 * Three output formats: **text** (plain or ANSI-colored), **SVG**, **PNG**.
-* **Zero external dependencies**: the PNG encoder (stb_image_write) and the
-  8x8 bitmap font are embedded in the repository (both public domain). Only a
-  C++17 compiler and CMake are needed.
+* **Zero external dependencies**: the PNG encoder (stb_image_write), the
+  TrueType rasterizer (stb_truetype) and an 8x8 fallback bitmap font are all
+  embedded in the repository (public domain). Only a C++17 compiler and
+  CMake are needed.
 
 ## Building
 
@@ -261,7 +262,7 @@ original Python implementation, plus the unit tests):
 ctest --test-dir build --output-on-failure
 ```
 
-Expected result: `passed: 81, failed: 0` and a zero exit status from
+Expected result: `passed: 98, failed: 0` and a zero exit status from
 `protocol_unit_tests`.
 
 ## Usage
@@ -299,11 +300,18 @@ another (stacked into a single canvas for image formats).
 | `--format <fmt>` | Output format: `text`, `svg` or `png` (default: `text`) |
 | **Color** | |
 | `-t, --theme <name>` | Color theme (default: `none` for text output, `light` for svg/png); see `protocol --list-themes` |
+| `--fg <color>` | Global foreground color override (borders, numbers, labels, pointers) — color name or `#RGB`/`#RRGGBB` |
+| `--bg <color>` | Canvas background color override (PNG/SVG) — same color syntax |
+| `--list-colors` | List the available color names |
 | `--color <mode>` | ANSI colors for terminal text output: `auto` (only when stdout is a TTY), `always`, `never` (default: `auto`) |
 | `--pointer <l@t>` | Add a pointer arrow with label `l` targeting row number or field name `t` (repeatable); see [Pointer arrows](#pointer-arrows) |
 | **PNG / SVG** | |
-| `--scale <n>` | PNG pixel scale, integer 1–8 (default: 2; one character cell = 8x12 font pixels x scale) |
-| `--transparent` | Transparent canvas background for PNG/SVG output |
+| `--scale <n>` | PNG pixel scale, integer 1–8 (default: 2) |
+| `--transparent` | Transparent canvas background for PNG/SVG |
+| `--no-fill` | Transparent field backgrounds (no field fill colors; spec-level: `fill=n`) |
+| `--ascii` | Render SVG/PNG exactly like the terminal ASCII output (characters as glyphs, no line primitives) |
+| `--font <file.ttf>` | PNG: TrueType font file (default: best system monospace font, embedded 8x8 font as fallback) |
+| `--font-family <name>` | SVG: preferred font family, prepended to the modern default stack |
 | **Information** | |
 | `--list` | List the built-in protocols |
 | `--list-themes` | List the available color themes |
@@ -453,8 +461,8 @@ $ protocol "Seq\, Nr:8,What\:ify\?:8,Code:16"
 
 Suffix a field's length with `~` (or `*`) to declare it **variable-length**
 (undefined length): the number is only the nominal display length, and the
-field's vertical edges are drawn dashed (`~` in ASCII, dashed lines in
-SVG/PNG), following the RFC 8300 convention. The rest of the layout —
+field's vertical edges are drawn dashed (`~` in ASCII; widely spaced dashes
+in SVG/PNG), following the RFC 8300 convention. The rest of the layout —
 wrapping, merged borders, bit numbers — works as usual.
 
 ```
@@ -484,16 +492,23 @@ protocol "Type:8,Data:16,Code:8?pointer=Ptr@Data"
 The **target** may be:
 
 * a **content row number** (1-based; content rows are the diagram lines that
-  carry fields — bit-number rows and pure border lines are not counted);
-* a **field name** (case-insensitive) — the arrow points at the first row
-  where that field starts, even if the field wraps across lines.
+  carry fields — bit-number rows and pure border lines are not counted) — a
+  horizontal arrow is drawn from the left margin to the row's start;
+* a **field name** (case-insensitive) — an **elbow arrow** is routed into the
+  row: the shaft runs from the left margin to beneath the field's center,
+  turns up with a `+` corner, and a `^` arrowhead lands in the border right
+  below the field's box. For fields that wrap across lines, the arrow aims at
+  the row where the field's label is printed.
 
-Placement is **smart**:
+Routing and layout are **automatic and non-destructive**:
 
+* each field pointer gets its own "lane" row inserted below the target row's
+  bottom border, so the diagram itself is never overwritten and stays
+  perfectly aligned (also in `--ascii` and multi-protocol stacking);
 * an out-of-range row number is clamped to the nearest valid row and a
   warning is printed to stderr (the command still succeeds);
 * an unknown field name is a clean error listing the available field names;
-* several pointers on the same row have their labels merged
+* several pointers on the same target have their labels merged
   (`"First, Also ---->"`);
 * labels are right-aligned so arrows line up, and when several protocols are
   stacked into one image their diagrams are aligned automatically;
@@ -507,12 +522,15 @@ $ protocol udp --pointer "Source ports@1" --pointer "Ptr@Checksum"
                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 Source ports ---->|          Source Port          |        Destination Port       |
                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-         Ptr ---->|             Length            |            Checksum           |
-                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                  |             Length            |            Checksum           |
+                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-^-+-+-+-+-+-+-+-+
+         Ptr -----------------------------------------------------+
 ```
 
 Pointer labels and arrows are colored with the theme's accent color
 (text via ANSI, SVG/PNG via the theme palette).
+
+![Elbow pointer arrows reaching into a row](examples/tcp_pointer_elbow.png)
 
 The following diagram shows where each character modifier applies:
 
@@ -558,15 +576,29 @@ are applied when a non-`none` theme is selected *and* color is enabled
 escape sequences.
 
 **SVG.** Vector output, ideal for documentation and slides. Field backgrounds
-are drawn as rectangles, borders as continuous lines, labels as real text
-(monospace web-font stack). Write it to a file with `-o file.svg` or pipe it
-from stdout (`--format svg`). `--transparent` omits the background rectangle.
+are drawn as rectangles, borders as continuous lines, labels as real text.
+Text uses a modern monospace font stack (`JetBrains Mono`, `Fira Code`,
+`Cascadia Code`, `ui-monospace`, `SF Mono`, `Menlo`, `Consolas`,
+`DejaVu Sans Mono`, ...) resolved by the viewer; prepend your own with
+`--font-family "My Mono"`. Write to a file with `-o file.svg` or pipe it from
+stdout (`--format svg`). `--transparent` omits the background rectangle;
+`--no-fill` omits the field fills.
 
-**PNG.** Bitmap output rasterized with an embedded 8x8 pixel font (pixel-art
-look). `--scale <n>` (1–8, default 2) multiplies the pixel size: at scale 2
-one character cell is 16x24 px. `--transparent` gives a transparent canvas
-(field fills and glyphs stay opaque). Encoding is done by the bundled
-stb_image_write — no libpng needed.
+**PNG.** Bitmap output rendered with a **modern TrueType monospace font**:
+the best available system font is auto-detected (JetBrains Mono, Fira Code,
+Cascadia, SF Mono, Menlo, Consolas, DejaVu Sans Mono, ...) and rasterized
+with anti-aliasing; `--font path/to/font.ttf` picks a specific font file
+(TTF/OTF/TTC). If no system font is found, an embedded 8x8 bitmap font is
+used as a fallback (retro pixel look). `--scale <n>` (1–8, default 2)
+multiplies the pixel size. `--transparent` gives a transparent canvas
+(glyphs stay opaque); `--no-fill` additionally leaves field backgrounds
+unfilled. Encoding is done by the bundled stb_image_write — no libpng needed.
+
+**ASCII rendering mode (`--ascii`).** By default, SVG/PNG output draws
+borders as continuous line primitives ("pretty" mode). With `--ascii`, every
+character of the diagram (`+`, `-`, `|`, `~`, labels, numbers) is drawn as a
+glyph, exactly like the terminal text output — a "terminal screenshot" style
+image, in a smooth modern font (PNG) or the SVG font stack.
 
 Format selection order: `--format` wins over the `-o` file extension; without
 either, the format is `text`.
@@ -599,6 +631,32 @@ apply to all three output formats (text via ANSI truecolor escapes).
 | `light` | `dark` | `ocean` |
 |---|---|---|
 | ![light](examples/tcp_light.png) | ![dark](examples/stack_dark.png) | ![ocean](examples/ipv6_ocean.png) |
+
+### Custom colors
+
+On top of themes, two options override individual colors globally:
+
+* `--fg <color>` — the foreground "ink": border lines, bit numbers, field
+  labels and pointer arrows (all output formats, including ANSI text).
+* `--bg <color>` — the canvas background (PNG/SVG).
+
+The color is either a well-known name (case-insensitive; ~55 standard CSS
+color names such as `white`, `black`, `tomato`, `slategray`, `gold`,
+`dodgerblue` — run `protocol --list-colors` for the full list) or a
+hexadecimal RGB value `#RGB` / `#RRGGBB`. Quote hex values in your shell,
+since `#` starts a comment otherwise: `--fg '#ff8800'`.
+
+**Recipe: diagrams for dark web pages.** White line art on a transparent
+canvas stays readable on dark backgrounds:
+
+```sh
+protocol udp -o udp_white.png --transparent --fg white --no-fill
+```
+
+(`--no-fill` removes the field fill colors; drop it if you want colored
+fields with white text.) The same recipe rendered on a black background:
+
+![White diagram on black background](examples/udp_white_onblack.png)
 
 ### Exit status
 
@@ -663,6 +721,23 @@ protocol udp --pointer "Ptr@Checksum" -o udp.svg --theme ocean
 
 # 16. Escaped special characters in field names
 protocol "Seq\\, Nr:8,What\\:ify\\?:8,Code:16"
+
+# 17. ASCII-look images (identical to the terminal output, glyph by glyph)
+protocol tcp -o tcp_ascii.png --ascii --theme dark
+protocol tcp -o tcp_ascii.svg --ascii
+
+# 18. Transparent field backgrounds (borders and labels only)
+protocol tcp -o tcp_nofill.png --no-fill
+protocol udp -o udp_float.png --no-fill --transparent --theme ocean
+
+# 19. Custom fonts (PNG: TTF file; SVG: font family name)
+protocol tcp -o tcp.png --font /System/Library/Fonts/Menlo.ttc
+protocol tcp -o tcp.svg --font-family "JetBrains Mono"
+
+# 20. Custom colors (names or hex) — e.g. white line art for dark web pages
+protocol udp -o udp_white.png --transparent --fg white --no-fill
+protocol ip -o ip_dark.svg --fg '#00ff88' --bg '#101010'
+protocol --list-colors
 ```
 
 ## Project layout
@@ -680,10 +755,12 @@ protocol/
 │   ├── border_lines.hpp    # Border cells -> continuous line segments
 │   ├── render_text.hpp/.cpp    # ASCII / ANSI truecolor renderer
 │   ├── render_svg.hpp/.cpp     # SVG renderer
-│   └── render_png.hpp/.cpp     # PNG renderer (embedded 8x8 bitmap font)
+│   ├── render_png.hpp/.cpp     # PNG renderer
+│   └── font.hpp/.cpp           # Font loading (system TTF + embedded 8x8 fallback)
 ├── third_party/
 │   ├── stb_image_write.h   # PNG encoder (public domain)
-│   ├── font8x8_basic.h     # 8x8 bitmap font (public domain)
+│   ├── stb_truetype.h      # TrueType font rasterizer (public domain)
+│   ├── font8x8_basic.h     # 8x8 bitmap fallback font (public domain)
 │   └── README.md           # Attribution & license notes
 ├── tests/
 │   ├── test_unit.cpp       # Framework-free unit tests (core library)
@@ -705,14 +782,17 @@ The suite:
 1. **Unit tests** (`tests/test_unit.cpp`, framework-free): escape-aware
    splitting/unescaping, variable-length parsing and layout, pointer spec
    parsing, pointer resolution (row numbers, field names, clamping, label
-   merging, alignment) and grid helpers — ~95 checks.
+   merging, alignment, elbow routing into rows), color parsing (names/hex),
+   font handling, render modes and grid helpers — ~165 checks.
 2. **Golden/integration tests** (`tests/run_tests.sh`): the ASCII output is
    compared byte-for-byte against golden files — all 40 built-in protocols
    plus edge cases generated with the original Python tool, plus golden files
    for the new features (variable-length fields, pointer arrows, escapes).
-   Also covered: SVG sanity (well-formed, dashed edges, pointer labels), PNG
-   sanity (magic bytes, including with pointers/dashed fields), pointer
-   clamping warnings, and error handling (invalid specs must exit 1).
+   Also covered: SVG sanity (well-formed output, dashed edges, pointer
+   labels, ASCII mode, `--no-fill`, the font stack), PNG sanity (magic
+   bytes, including pointers/dashed fields/ASCII mode/explicit fonts),
+   pointer clamping warnings, and error handling (invalid specs must
+   exit 1).
 
 ## Third-party components
 
@@ -720,6 +800,8 @@ Both bundled in `third_party/`, both public domain (see
 `third_party/README.md`):
 
 * **stb_image_write.h** — PNG encoder by Sean Barrett
+  (<https://github.com/nothings/stb>).
+* **stb_truetype.h** — TrueType font rasterizer by Sean Barrett
   (<https://github.com/nothings/stb>).
 * **font8x8_basic.h** — 8x8 bitmap font by Daniel Hepper, based on IBM's
   public-domain VGA fonts (<https://github.com/dhepper/font8x8>).
@@ -771,7 +853,8 @@ ASCII 输出与原版**逐字节一致**（`tests/` 中有回归测试保证）�
 * 可配置每行比特数、可隐藏比特序号行、可自定义边框字符。
 * 字段名支持**反斜杠转义**（`\,`、`\:`、`\?`、`\\` 等）。
 * 三种输出格式：**文本**（纯 ASCII 或 ANSI 彩色）、**SVG**、**PNG**。
-* **零外部依赖**：PNG 编码器（stb_image_write）与 8x8 点阵字体已内嵌（均为 public domain），
+* **零外部依赖**：PNG 编码器（stb_image_write）、TrueType 栅格化器（stb_truetype）
+  与 8x8 回退点阵字体均已内嵌（均为 public domain），
   只需 C++17 编译器和 CMake。
 
 ## 编译安装
@@ -901,7 +984,7 @@ c++ -std=c++17 -O2 -fno-strict-aliasing -Isrc -Ithird_party \
 ctest --test-dir build --output-on-failure
 ```
 
-预期结果：`passed: 81, failed: 0`，且 `protocol_unit_tests` 返回 0。
+预期结果：`passed: 98, failed: 0`，且 `protocol_unit_tests` 返回 0。
 
 ## 使用方法
 
@@ -936,11 +1019,18 @@ protocol {<协议名> 或 <协议规格>} [选项]
 | `--format <格式>` | 输出格式：`text`、`svg` 或 `png`（默认 `text`） |
 | **颜色** | |
 | `-t, --theme <名称>` | 颜色主题（文本默认 `none`，图片默认 `light`）；见 `protocol --list-themes` |
+| `--fg <颜色>` | 全局前景色覆盖（边框、比特序号、字段标签、指针箭头）——颜色名或 `#RGB`/`#RRGGBB` |
+| `--bg <颜色>` | 画布背景色覆盖（PNG/SVG）——颜色语法同上 |
+| `--list-colors` | 列出全部预制颜色名 |
 | `--color <模式>` | 终端 ANSI 彩色：`auto`（仅当 stdout 是终端时启用）、`always`、`never`（默认 `auto`） |
 | `--pointer <标签@目标>` | 添加指针箭头：标签 @ 行号或字段名（可重复）；详见[指针箭头](#指针箭头) |
 | **PNG / SVG** | |
-| `--scale <n>` | PNG 像素缩放，整数 1–8（默认 2；一个字符格 = 8x12 字体像素 x 缩放） |
+| `--scale <n>` | PNG 像素缩放，整数 1–8（默认 2） |
 | `--transparent` | PNG/SVG 使用透明画布背景 |
+| `--no-fill` | 字段背景透明（不绘制字段填充色；规格内可用 `fill=n`） |
+| `--ascii` | SVG/PNG 以与终端 ASCII 输出完全一致的方式逐字符渲染（字符字形，不转线条） |
+| `--font <file.ttf>` | PNG：TrueType 字体文件（默认自动探测现代系统等宽字体，找不到时回退内嵌 8x8 字体） |
+| `--font-family <名称>` | SVG：首选字体族，置于现代默认字体栈之前 |
 | **信息** | |
 | `--list` | 列出全部内置协议 |
 | `--list-themes` | 列出全部颜色主题 |
@@ -1082,8 +1172,8 @@ $ protocol "Seq\, Nr:8,What\:ify\?:8,Code:16"
 ### 变长字段
 
 在字段长度后加 `~`（或 `*`）即可声明**变长字段**（长度未定义）：该数字只是
-图示用的标称长度，字段的竖直边缘将绘制为虚线（ASCII 中为 `~`，SVG/PNG 中为
-虚线线段），遵循 RFC 8300 的惯例。其余布局行为（折行、合并边框、比特序号）
+图示用的标称长度，字段的竖直边缘将绘制为虚线（ASCII 中为 `~`；SVG/PNG 中为
+间隔较宽的虚线线段），遵循 RFC 8300 的惯例。其余布局行为（折行、合并边框、比特序号）
 照常工作。
 
 ```
@@ -1112,14 +1202,19 @@ protocol "Type:8,Data:16,Code:8?pointer=Ptr@Data"
 
 **目标**可以是：
 
-* **内容行号**（从 1 开始；内容行指承载字段的行——比特序号行和纯边框行不计入）；
-* **字段名**（大小写不敏感）——箭头指向该字段开始的第一行，即使字段跨行折行。
+* **内容行号**（从 1 开始；内容行指承载字段的行——比特序号行和纯边框行不计入）——
+  从左边距画一条水平箭头指向该行的开头；
+* **字段名**（大小写不敏感）——绘制**折线箭头**深入行内：线段从左边距延伸到字段
+  中心下方，以 `+` 转角向上，`^` 箭头落在字段框正下方的边框上。对于跨行折行的字段，
+  箭头指向打印字段标签的那一行。
 
-位置处理是**智能**的：
+路径布局是**自动且不破坏图表**的：
 
+* 每个字段指针都有独立插入的"导向行"（lane row），位于目标行下边框之下，
+  图表本体绝不被覆盖，所有行保持对齐（`--ascii` 模式和多协议堆叠同样如此）；
 * 行号越界时自动钳位到最近的有效行，并在 stderr 打印警告（命令仍成功）；
 * 字段名不存在时给出清晰的错误信息并列出可用字段名；
-* 多个指针指向同一行时标签自动合并（`"First, Also ---->"`）；
+* 多个指针指向同一目标时标签自动合并（`"First, Also ---->"`）；
 * 标签自动右对齐使箭头对齐；多协议堆叠成一张图片时图表也会自动对齐；
 * 标签支持同样的[转义序列](#转义序列)（如 `--pointer "Start\\, middle@1"`）。
 
@@ -1130,11 +1225,14 @@ $ protocol udp --pointer "Source ports@1" --pointer "Ptr@Checksum"
                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 Source ports ---->|          Source Port          |        Destination Port       |
                   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-         Ptr ---->|             Length            |            Checksum           |
-                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+                  |             Length            |            Checksum           |
+                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-^-+-+-+-+-+-+-+-+
+         Ptr -----------------------------------------------------+
 ```
 
 指针标签与箭头使用主题的强调色绘制（文本走 ANSI 真彩色，SVG/PNG 走主题调色板）。
+
+![深入行内的折线指针箭头](examples/tcp_pointer_elbow.png)
 
 各字符修饰符作用位置示意：
 
@@ -1176,13 +1274,23 @@ protocol -f my_protocols.txt -o all.svg     # 两个协议堆叠到同一张 SVG
 `-o file.txt` 时写入文件。选择非 `none` 主题且启用彩色时输出 ANSI 真彩色转义序列
 （`--color auto` 仅在 stdout 为终端时启用）；写入文件时绝不包含转义序列。
 
-**SVG**：矢量输出，适合文档与幻灯片。字段背景为矩形，边框为连续线条，标签为真实文字
-（等宽字体栈）。通过 `-o file.svg` 写文件，或 `--format svg` 从 stdout 输出。
-`--transparent` 省略背景矩形。
+**SVG**：矢量输出，适合文档与幻灯片。字段背景为矩形，边框为连续线条，标签为真实文字。
+文字使用现代等宽字体栈（`JetBrains Mono`、`Fira Code`、`Cascadia Code`、`ui-monospace`、
+`SF Mono`、`Menlo`、`Consolas`、`DejaVu Sans Mono`……由查看器解析），可用
+`--font-family "My Mono"` 指定首选字体。通过 `-o file.svg` 写文件，或 `--format svg`
+从 stdout 输出。`--transparent` 省略背景矩形；`--no-fill` 省略字段填充。
 
-**PNG**：使用内嵌 8x8 像素字体栅格化的位图（像素风）。`--scale <n>`（1–8，默认 2）
-控制像素大小：缩放为 2 时一个字符格为 16x24 像素。`--transparent` 生成透明画布
-（字段填充与字形保持不透明）。编码由内嵌 stb_image_write 完成，无需 libpng。
+**PNG**：位图输出，使用**现代 TrueType 等宽字体**渲染：自动探测系统中最优字体
+（JetBrains Mono、Fira Code、Cascadia、SF Mono、Menlo、Consolas、DejaVu Sans Mono……），
+抗锯齿栅格化；`--font path/to/font.ttf` 可指定字体文件（TTF/OTF/TTC）。找不到系统字体时
+回退到内嵌 8x8 点阵字体（复古像素风）。`--scale <n>`（1–8，默认 2）控制像素大小。
+`--transparent` 生成透明画布（字形保持不透明）；`--no-fill` 则不填充字段背景。
+编码由内嵌 stb_image_write 完成，无需 libpng。
+
+**ASCII 渲染模式（`--ascii`）**：默认 SVG/PNG 把边框绘制为连续线条（"美化"模式）。
+加 `--ascii` 后，图中的每个字符（`+`、`-`、`|`、`~`、标签、序号）都按字形逐字符绘制，
+效果与终端文本输出完全一致——相当于一张使用现代平滑字体（PNG）或 SVG 字体栈的
+"终端截图"。
 
 格式选择优先级：`--format` 高于 `-o` 文件扩展名；两者都没有时为 `text`。
 
@@ -1209,6 +1317,30 @@ $ protocol --list-themes
 
 字段颜色按主题调色板循环分配，相邻字段颜色一定不同；跨多行的字段保持同一颜色。
 主题对三种输出格式都生效（文本通过 ANSI 真彩色转义）。
+
+### 自定义颜色
+
+在主题之上，还有两个选项可以全局覆盖颜色：
+
+* `--fg <颜色>` —— 前景"笔墨"色：边框线条、比特序号、字段标签、指针箭头
+  （对全部输出格式生效，包括 ANSI 文本）。
+* `--bg <颜色>` —— 画布背景色（PNG/SVG）。
+
+颜色可以是知名颜色名（大小写不敏感；约 55 个标准 CSS 颜色名，如 `white`、
+`black`、`tomato`、`slategray`、`gold`、`dodgerblue`——运行
+`protocol --list-colors` 查看完整列表），或十六进制 RGB 值 `#RGB` / `#RRGGBB`。
+注意在 shell 中十六进制值要加引号，因为 `#` 会被当作注释：`--fg '#ff8800'`。
+
+**配方：黑色网页高亮图。** 透明画布 + 白色线图，在深色背景上清晰高亮：
+
+```sh
+protocol udp -o udp_white.png --transparent --fg white --no-fill
+```
+
+（`--no-fill` 去掉字段填充色；如果想要彩色字段配白色文字则去掉该选项。）
+同一配方绘制在黑色背景上的效果：
+
+![黑色背景上的白色图表](examples/udp_white_onblack.png)
 
 ### 退出状态码
 
@@ -1273,6 +1405,23 @@ protocol udp --pointer "Ptr@Checksum" -o udp.svg --theme ocean
 
 # 16. 字段名中的转义特殊字符
 protocol "Seq\\, Nr:8,What\\:ify\\?:8,Code:16"
+
+# 17. ASCII 同款图片（与终端输出完全一致的逐字符渲染）
+protocol tcp -o tcp_ascii.png --ascii --theme dark
+protocol tcp -o tcp_ascii.svg --ascii
+
+# 18. 字段背景透明（保留边框与文字）
+protocol tcp -o tcp_nofill.png --no-fill
+protocol udp -o udp_float.png --no-fill --transparent --theme ocean
+
+# 19. 指定字体（PNG 用 TTF 文件；SVG 用字体族名）
+protocol tcp -o tcp.png --font /System/Library/Fonts/Menlo.ttc
+protocol tcp -o tcp.svg --font-family "JetBrains Mono"
+
+# 20. 自定义颜色（颜色名或十六进制）——例如黑色网页用的白色线图
+protocol udp -o udp_white.png --transparent --fg white --no-fill
+protocol ip -o ip_dark.svg --fg '#00ff88' --bg '#101010'
+protocol --list-colors
 ```
 
 ## 项目结构
@@ -1290,10 +1439,12 @@ protocol/
 │   ├── border_lines.hpp    # 边框字符 -> 连续线段（含 '~' 虚线）
 │   ├── render_text.hpp/.cpp    # ASCII / ANSI 真彩色渲染器
 │   ├── render_svg.hpp/.cpp     # SVG 渲染器
-│   └── render_png.hpp/.cpp     # PNG 渲染器（内嵌 8x8 点阵字体）
+│   ├── render_png.hpp/.cpp     # PNG 渲染器
+│   └── font.hpp/.cpp           # 字体加载（系统 TTF + 内嵌 8x8 回退）
 ├── third_party/
 │   ├── stb_image_write.h   # PNG 编码器（public domain）
-│   ├── font8x8_basic.h     # 8x8 点阵字体（public domain）
+│   ├── stb_truetype.h      # TrueType 字体栅格化（public domain）
+│   ├── font8x8_basic.h     # 8x8 点阵回退字体（public domain）
 │   └── README.md           # 第三方组件声明
 ├── tests/
 │   ├── test_unit.cpp       # 无框架单元测试（核心库）
@@ -1313,13 +1464,13 @@ ctest --test-dir build --output-on-failure   # 通过 CTest 运行两者
 测试内容：
 
 1. **单元测试**（`tests/test_unit.cpp`，无框架）：转义分割/还原、变长字段解析与布局、
-   指针规格解析、指针定位（行号、字段名、钳位、标签合并、对齐）与网格辅助函数，
-   约 95 项检查。
+   指针规格解析、指针定位（行号、字段名、钳位、标签合并、对齐、深入行内的折线
+   路由）、颜色解析（颜色名/十六进制）、字体处理、渲染模式与网格辅助函数，约 165 项检查。
 2. **黄金/集成测试**（`tests/run_tests.sh`）：ASCII 输出与黄金文件逐字节比对——
    覆盖全部 40 个内置协议及由原 Python 工具生成的边界用例，以及新特性的黄金文件
-   （变长字段、指针箭头、转义）。还包括：SVG 健全性（格式合法、虚线、指针标签）、
-   PNG 健全性（魔数，含指针/虚线场景）、指针钳位警告、错误处理（非法规格必须以
-   退出码 1 失败）。
+   （变长字段、指针箭头、转义）。还包括：SVG 健全性（格式合法、虚线、指针标签、
+   ASCII 模式、`--no-fill`、字体栈）、PNG 健全性（魔数，含指针/虚线/ASCII 模式/
+   显式字体加载）、指针钳位警告、错误处理（非法规格必须以退出码 1 失败）。
 
 ## 许可证
 

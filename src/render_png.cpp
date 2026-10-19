@@ -1,9 +1,10 @@
 /*
  * protocol - A simple header generator for network protocols (C++ edition)
  *
- * PNG renderer. Rasterizes the character grid with an embedded public-domain
- * 8x8 bitmap font and encodes PNG with stb_image_write (public domain).
- * No external library dependencies.
+ * PNG renderer. Rasterizes the character grid with a modern TrueType
+ * monospace font found on the system (via stb_truetype), falling back to an
+ * embedded 8x8 bitmap font. Encodes PNG with stb_image_write (both public
+ * domain). No external library dependencies.
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -13,14 +14,13 @@
 #include "render_png.hpp"
 
 #include <algorithm>
-#include <cstring>
+#include <stdexcept>
 
 #include "border_lines.hpp"
+#include "font.hpp"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
-
-#include <font8x8_basic.h>
 
 namespace protocol {
 
@@ -28,12 +28,29 @@ namespace {
 
 struct Canvas {
     int w = 0, h = 0;
-    std::vector<std::uint8_t> px; // RGBA
+    std::vector<std::uint8_t> px; // RGBA, non-premultiplied
 
     void set(int x, int y, Color c) {
         if (x < 0 || y < 0 || x >= w || y >= h) return;
         std::uint8_t* p = &px[(static_cast<std::size_t>(y) * w + x) * 4];
         p[0] = c.r; p[1] = c.g; p[2] = c.b; p[3] = c.a;
+    }
+
+    /** Alpha-composites a glyph coverage value (0..255) of color c. */
+    void blend(int x, int y, Color c, std::uint8_t coverage) {
+        if (x < 0 || y < 0 || x >= w || y >= h || coverage == 0) return;
+        std::uint8_t* p = &px[(static_cast<std::size_t>(y) * w + x) * 4];
+        float sa = (coverage / 255.0f) * (c.a / 255.0f);
+        float da = p[3] / 255.0f;
+        float oa = sa + da * (1.0f - sa);
+        if (oa <= 0.0f) {
+            p[0] = p[1] = p[2] = p[3] = 0;
+            return;
+        }
+        p[0] = static_cast<std::uint8_t>((c.r * sa + p[0] * da * (1.0f - sa)) / oa);
+        p[1] = static_cast<std::uint8_t>((c.g * sa + p[1] * da * (1.0f - sa)) / oa);
+        p[2] = static_cast<std::uint8_t>((c.b * sa + p[2] * da * (1.0f - sa)) / oa);
+        p[3] = static_cast<std::uint8_t>(oa * 255.0f);
     }
 
     void fill_rect(int x, int y, int rw, int rh, Color c) {
@@ -44,24 +61,8 @@ struct Canvas {
     }
 };
 
-void draw_glyph(Canvas& cv, int x, int y, char ch, int scale, Color color) {
-    unsigned char code = static_cast<unsigned char>(ch);
-    if (code > 127) code = '?';
-    const unsigned char* glyph = font8x8_basic[code];
-    for (int gy = 0; gy < 8; ++gy) {
-        std::uint8_t bits = static_cast<std::uint8_t>(glyph[gy]);
-        if (!bits) continue;
-        for (int gx = 0; gx < 8; ++gx) {
-            if ((bits >> gx) & 1U) {
-                cv.fill_rect(x + gx * scale, y + gy * scale, scale, scale, color);
-            }
-        }
-    }
-}
-
 /** Draws a border cell as continuous line segments so that boxes look
- *  properly closed (font glyphs would leave gaps between character rows).
- *  '~' cells (variable-length field edges) are drawn as dashed verticals. */
+ *  properly closed. '~' cells (variable-length field edges) are dashed. */
 void draw_border_cell(Canvas& cv, int x, int y, int cell_w, int cell_h, const BorderSeg& seg,
                       Color color) {
     const int t = std::max(1, cell_w / 8); // line thickness in px
@@ -72,13 +73,23 @@ void draw_border_cell(Canvas& cv, int x, int y, int cell_w, int cell_h, const Bo
     int y1 = seg.vline_down ? y + cell_h : cy;
     if (y1 > y0) {
         if (seg.dashed) {
-            const int dash = 2 * std::max(1, cell_w / 8);
-            for (int yy = y0; yy < y1; yy += dash * 2)
+            const int t2 = std::max(1, cell_w / 8);
+            const int dash = 2 * t2;
+            const int gap = 3 * t2; // airier gaps between dashes
+            for (int yy = y0; yy < y1; yy += dash + gap)
                 cv.fill_rect(cx - t / 2, yy, t, std::min(dash, y1 - yy), color);
         } else {
             cv.fill_rect(cx - t / 2, y0, t, y1 - y0, color);
         }
     }
+}
+
+void draw_glyph(Canvas& cv, RasterFont& font, int cell_x, int cell_y, char ch, Color color) {
+    const GlyphBitmap& gb = font.glyph(ch);
+    for (int gy = 0; gy < gb.h; ++gy)
+        for (int gx = 0; gx < gb.w; ++gx)
+            cv.blend(cell_x + gb.xoff + gx, cell_y + gb.yoff + gy, color,
+                     gb.alpha[gy * gb.w + gx]);
 }
 
 void png_write_to_vector(void* ctx, void* data, int size) {
@@ -92,12 +103,22 @@ void png_write_to_vector(void* ctx, void* data, int size) {
 std::vector<std::uint8_t> render_png(const std::vector<Grid>& grids, const Theme& theme,
                                      const PngOptions& opts) {
     const int scale = std::max(1, std::min(8, opts.scale));
-    const int cell_w = 8 * scale;
-    const int cell_h = 12 * scale; // 8px glyph + vertical padding
-    const int glyph_yoff = 2 * scale;
+
+    RasterFont font;
+    if (opts.force_bitmap) {
+        font = RasterFont::bitmap(scale);
+    } else {
+        std::string used_path;
+        if (!load_png_font(opts.font_path, scale, font, used_path)) {
+            throw std::runtime_error("Cannot load font file '" + opts.font_path + "'");
+        }
+    }
+
+    const int cell_w = font.cell_w();
+    const int cell_h = font.cell_h();
     const int pad_x = cell_w;
     const int pad_y = cell_h / 2;
-    const int gap = cell_h;
+    const int gap = cell_h; // vertical gap between stacked diagrams
 
     std::size_t max_cols = 0, total_rows = 0;
     for (const Grid& g : grids) {
@@ -122,14 +143,16 @@ std::vector<std::uint8_t> render_png(const std::vector<Grid>& grids, const Theme
         for (std::size_t r = 0; r < grid.rows.size(); ++r) {
             const auto& row = grid.rows[r];
             // Field backgrounds.
-            for (std::size_t col = 0; col < row.size(); ++col) {
-                const Cell& c = row[col];
-                if (c.role == Role::FieldBg || c.role == Role::FieldText) {
-                    cv.fill_rect(pad_x + static_cast<int>(col) * cell_w, y_off, cell_w, cell_h,
-                                 theme.field_fill(c.field));
+            if (grid.fill_fields) {
+                for (std::size_t col = 0; col < row.size(); ++col) {
+                    const Cell& c = row[col];
+                    if (c.role == Role::FieldBg || c.role == Role::FieldText) {
+                        cv.fill_rect(pad_x + static_cast<int>(col) * cell_w, y_off, cell_w,
+                                     cell_h, theme.field_fill(c.field));
+                    }
                 }
             }
-            // Border lines and glyphs.
+            // Border lines (pretty mode) and glyphs.
             for (std::size_t col = 0; col < row.size(); ++col) {
                 const Cell& c = row[col];
                 if (c.ch == ' ') continue;
@@ -143,11 +166,12 @@ std::vector<std::uint8_t> render_png(const std::vector<Grid>& grids, const Theme
                     default: continue;
                 }
                 int x = pad_x + static_cast<int>(col) * cell_w;
-                BorderSeg seg = border_segments(grid.rows, r, col);
+                BorderSeg seg;
+                if (!opts.ascii) seg = border_segments(grid.rows, r, col);
                 if (seg.any()) {
                     draw_border_cell(cv, x, y_off, cell_w, cell_h, seg, color);
                 } else {
-                    draw_glyph(cv, x, y_off + glyph_yoff, c.ch, scale, color);
+                    draw_glyph(cv, font, x, y_off, c.ch, color);
                 }
             }
             y_off += cell_h;

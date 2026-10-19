@@ -33,7 +33,7 @@ struct Style {
     bool operator!=(const Style& o) const { return !(*this == o); }
 };
 
-Style style_for(const Cell& cell, const Theme& theme) {
+Style style_for(const Cell& cell, const Theme& theme, bool fill_fields) {
     Style s;
     switch (cell.role) {
         case Role::Border:
@@ -48,14 +48,18 @@ Style style_for(const Cell& cell, const Theme& theme) {
         case Role::FieldText:
             s.has_fg = true;
             s.fg = theme.text;
-            s.has_bg = true;
-            s.bg = theme.field_fill(cell.field);
+            if (fill_fields) {
+                s.has_bg = true;
+                s.bg = theme.field_fill(cell.field);
+            }
             break;
         case Role::FieldBg:
-            s.has_fg = true;
-            s.fg = theme.field_fill(cell.field);
-            s.has_bg = true;
-            s.bg = theme.field_fill(cell.field);
+            if (fill_fields) {
+                s.has_fg = true;
+                s.fg = theme.field_fill(cell.field);
+                s.has_bg = true;
+                s.bg = theme.field_fill(cell.field);
+            }
             break;
         case Role::Pointer:
             s.has_fg = true;
@@ -86,7 +90,7 @@ std::string render_text_ansi(const Grid& grid, const Theme& theme) {
     };
     for (std::size_t r = 0; r < grid.rows.size(); ++r) {
         for (const Cell& c : grid.rows[r]) {
-            Style s = style_for(c, theme);
+            Style s = style_for(c, theme, grid.fill_fields);
             if (s != current) {
                 if (styled) out += "\x1b[0m"; // reset before applying a new style
                 current = s;

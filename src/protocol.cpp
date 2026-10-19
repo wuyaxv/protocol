@@ -266,6 +266,15 @@ void Protocol::parse_spec(const std::string& spec) {
                 // Pass the raw (still escaped) value; parse_pointer_spec
                 // resolves escapes itself after splitting label and target.
                 pointers.push_back(parse_pointer_spec(raw_value));
+            } else if (var == "fill") {
+                std::string v = to_lower(value);
+                if (v == "0" || v == "n" || v == "no" || v == "none" || v == "false") {
+                    fill_fields = false;
+                } else if (v == "1" || v == "y" || v == "yes" || v == "true") {
+                    fill_fields = true;
+                } else {
+                    throw ProtocolException("FATAL: Invalid value for 'fill' option (" + value + ")");
+                }
             }
             // Unknown options are silently ignored (same as the original tool).
         }
@@ -322,6 +331,7 @@ std::vector<Protocol::Field> Protocol::process_field_list() const {
 Grid Protocol::layout() const {
     std::vector<Field> proto_fields = process_field_list();
     Grid grid;
+    grid.fill_fields = fill_fields;
 
     // Top bit-number rows.
     if (do_print_top_tens) {
@@ -449,8 +459,7 @@ Grid Protocol::layout() const {
         }
     }
 
-    // ---- Variable-length fields: dashed edges -------------------------
-    // Replace every border cell that is horizontally adjacent to a
+    // ---- Variable-length fields: dashed edges -------------------------    // Replace every border cell that is horizontally adjacent to a
     // variable-length field's interior with VARLEN_CHAR ('~'), producing
     // RFC-style dashed box sides. This uniform post-pass covers field
     // lines, multi-line big fields and merged border lines alike.
@@ -485,7 +494,8 @@ void Protocol::attach_pointers(Grid& grid) const {
     // covers normal field lines, multi-line big-field interiors and merged
     // continuation lines). Row numbers seen by users count these, 1-based.
     std::vector<std::size_t> content_rows;
-    std::map<int, std::size_t> field_first_row;
+    std::map<int, std::size_t> field_first_row; // first content row per field
+    std::map<int, std::size_t> field_label_row; // first row with the field's label
     for (std::size_t r = 0; r < grid.rows.size(); ++r) {
         bool has_field = false;
         for (const Cell& c : grid.rows[r]) {
@@ -494,16 +504,32 @@ void Protocol::attach_pointers(Grid& grid) const {
                 auto it = field_first_row.find(c.field);
                 if (it == field_first_row.end() || r < it->second)
                     field_first_row[c.field] = r;
+                if (c.role == Role::FieldText &&
+                    field_label_row.find(c.field) == field_label_row.end())
+                    field_label_row[c.field] = r;
             }
         }
         if (has_field) content_rows.push_back(r);
     }
     if (content_rows.empty()) return; // no place to point at
 
-    // Resolve every pointer target to a grid row.
-    std::vector<std::pair<std::size_t, std::string>> by_row; // row -> label
+    // Resolve every pointer target. Row numbers produce horizontal arrows at
+    // the row's start; field names produce elbow arrows that travel from the
+    // left margin to beneath the field and point up at its box ('^').
+    struct RowArrow {
+        std::size_t row;
+        std::string label;
+    };
+    struct FieldArrow {
+        std::size_t arrow_row; // border row that receives the '^' arrowhead
+        int cx = 0;            // column of the arrowhead (pre-margin coords)
+        std::string label;
+        std::size_t lane_row = 0; // inserted lane row (filled during insertion)
+    };
+    std::vector<RowArrow> row_arrows;
+    std::vector<FieldArrow> field_arrows;
+
     for (const Pointer& p : pointers) {
-        std::size_t row = 0;
         bool is_int = false;
         int rownum = py_int(p.target, is_int);
         if (is_int) {
@@ -518,60 +544,173 @@ void Protocol::attach_pointers(Grid& grid) const {
                                         std::to_string(n) + "), clamped to " +
                                         std::to_string(clamped));
             }
-            row = content_rows[static_cast<std::size_t>(clamped) - 1];
-        } else {
-            // Field name target (case-insensitive).
-            std::string want = to_lower(trim(p.target));
-            int fid = -1;
-            for (const Field& f : field_list_) {
-                if (to_lower(f.text) == want) {
-                    fid = f.id;
-                    break;
-                }
-            }
-            auto it = field_first_row.find(fid);
-            if (fid < 0 || it == field_first_row.end()) {
-                std::string avail;
-                for (const Field& f : field_list_) {
-                    if (!avail.empty()) avail += ", ";
-                    avail += "'" + f.text + "'";
-                }
-                throw ProtocolException("FATAL: pointer refers to unknown field '" + p.target +
-                                        "' (available fields: " + avail + ")");
-            }
-            row = it->second;
+            row_arrows.push_back({content_rows[static_cast<std::size_t>(clamped) - 1], p.label});
+            continue;
         }
-        // Several pointers may share a row: merge their labels.
-        auto existing = std::find_if(by_row.begin(), by_row.end(),
-                                     [&](const auto& e) { return e.first == row; });
-        if (existing == by_row.end())
-            by_row.push_back({row, p.label});
-        else if (existing->second.empty())
-            existing->second = p.label;
-        else if (!p.label.empty())
-            existing->second += ", " + p.label;
+
+        // Field name target (case-insensitive).
+        std::string want = to_lower(trim(p.target));
+        int fid = -1;
+        for (const Field& f : field_list_) {
+            if (to_lower(f.text) == want) {
+                fid = f.id;
+                break;
+            }
+        }
+        auto it = field_first_row.find(fid);
+        if (fid < 0 || it == field_first_row.end()) {
+            std::string avail;
+            for (const Field& f : field_list_) {
+                if (!avail.empty()) avail += ", ";
+                avail += "'" + f.text + "'";
+            }
+            throw ProtocolException("FATAL: pointer refers to unknown field '" + p.target +
+                                    "' (available fields: " + avail + ")");
+        }
+
+        // Point where the field's label is shown (for fragmented fields the
+        // label may live on a later fragment row), else its first row.
+        std::size_t lrow = it->second;
+        auto lr = field_label_row.find(fid);
+        if (lr != field_label_row.end()) lrow = lr->second;
+
+        // Horizontal span of the field on that row; aim at its center.
+        int c0 = -1, c1 = -1;
+        for (std::size_t c = 0; c < grid.rows[lrow].size(); ++c) {
+            const Cell& cell = grid.rows[lrow][c];
+            if (cell.field == fid && (cell.role == Role::FieldBg || cell.role == Role::FieldText)) {
+                if (c0 < 0) c0 = static_cast<int>(c);
+                c1 = static_cast<int>(c);
+            }
+        }
+        if (c0 < 0) { // no visible span (unexpected): degrade to a row arrow
+            row_arrows.push_back({lrow, p.label});
+            continue;
+        }
+        int cx = (c0 + c1) / 2;
+
+        // The arrowhead sits in the first row below the label row whose cell
+        // at cx is a border cell (skipping multi-line interiors and merged
+        // continuation spans, so the arrow points at the field box's floor).
+        std::size_t arow = grid.rows.size();
+        for (std::size_t r = lrow + 1; r < grid.rows.size(); ++r) {
+            if (cx < static_cast<int>(grid.rows[r].size()) &&
+                grid.rows[r][cx].role == Role::Border) {
+                arow = r;
+                break;
+            }
+        }
+        if (arow == grid.rows.size()) { // no border found: degrade gracefully
+            row_arrows.push_back({lrow, p.label});
+            continue;
+        }
+        field_arrows.push_back({arow, cx, p.label, 0});
     }
 
-    // Build the left margin: right-aligned label + " " + 4-dash shaft + '>'.
+    // Merge pointers that share the same target (labels joined with ", ").
+    auto merge_label = [](std::string& dst, const std::string& src) {
+        if (dst.empty()) dst = src;
+        else if (!src.empty()) dst += ", " + src;
+    };
+    {
+        std::vector<RowArrow> merged;
+        for (const RowArrow& ra : row_arrows) {
+            auto it = std::find_if(merged.begin(), merged.end(),
+                                   [&](const RowArrow& e) { return e.row == ra.row; });
+            if (it == merged.end()) merged.push_back(ra);
+            else merge_label(it->label, ra.label);
+        }
+        row_arrows = std::move(merged);
+
+        std::vector<FieldArrow> fmerged;
+        for (const FieldArrow& fa : field_arrows) {
+            auto it = std::find_if(fmerged.begin(), fmerged.end(), [&](const FieldArrow& e) {
+                return e.arrow_row == fa.arrow_row && e.cx == fa.cx;
+            });
+            if (it == fmerged.end()) fmerged.push_back(fa);
+            else merge_label(it->label, fa.label);
+        }
+        field_arrows = std::move(fmerged);
+    }
+
+    // Insert lane rows and arrowheads, bottom-up so row indices stay valid.
+    // Several arrows under the same row get stacked lanes in pointer order.
+    std::stable_sort(field_arrows.begin(), field_arrows.end(),
+                     [](const FieldArrow& a, const FieldArrow& b) { return a.arrow_row > b.arrow_row; });
+    {
+        std::size_t prev_arow = std::string::npos;
+        int k = 0;
+        for (auto& fa : field_arrows) {
+            if (fa.arrow_row != prev_arow) {
+                prev_arow = fa.arrow_row;
+                k = 0;
+            }
+            std::size_t pos = fa.arrow_row + 1 + k;
+            ++k;
+            grid.rows[fa.arrow_row][fa.cx] = Cell{'^', Role::Pointer, -1};
+            grid.rows.insert(grid.rows.begin() + pos,
+                             std::vector<Cell>(grid.width(), Cell{' ', Role::Empty, -1}));
+            // Shift bookkeeping for rows at or below the insertion point:
+            // previously inserted lanes move down by one; lanes not yet
+            // inserted keep lane_row == 0 (sentinel) and are unaffected
+            // (they are above the insertion point, processed later).
+            for (auto& other : field_arrows)
+                if (other.lane_row != 0 && other.lane_row >= pos) other.lane_row += 1;
+            fa.lane_row = pos;
+            for (auto& ra : row_arrows)
+                if (ra.row >= pos) ra.row += 1;
+        }
+    }
+
+    // Build the left margin: right-aligned label + " " + arrow shaft.
     std::size_t max_label = 0;
-    for (const auto& e : by_row) max_label = std::max(max_label, e.second.size());
-    const int margin = static_cast<int>(max_label + 6);
+    for (const auto& e : row_arrows) max_label = std::max(max_label, e.label.size());
+    for (const auto& e : field_arrows) max_label = std::max(max_label, e.label.size());
+    const int margin = static_cast<int>(max_label + 6); // label + space + 4 dashes + head
+
+    auto label_cells = [&](const std::string& label) {
+        std::vector<Cell> cells;
+        for (std::size_t i = label.size(); i < max_label; ++i)
+            cells.push_back(Cell{' ', Role::Empty, -1});
+        for (char c : label) cells.push_back(Cell{c, Role::Pointer, -1});
+        return cells;
+    };
+
     for (std::size_t r = 0; r < grid.rows.size(); ++r) {
+        // Row arrow?
+        const RowArrow* ra = nullptr;
+        for (const auto& e : row_arrows)
+            if (e.row == r) ra = &e;
+        // Lane row?
+        const FieldArrow* fa = nullptr;
+        for (const auto& e : field_arrows)
+            if (e.lane_row == r) fa = &e;
+
         std::vector<Cell> prefix;
-        const std::string* lbl = nullptr;
-        for (const auto& e : by_row)
-            if (e.first == r) lbl = &e.second;
-        if (lbl != nullptr) {
-            for (std::size_t i = lbl->size(); i < max_label; ++i)
-                prefix.push_back(Cell{' ', Role::Empty, -1});
-            for (char c : *lbl) prefix.push_back(Cell{c, Role::Pointer, -1});
+        if (ra != nullptr) {
+            // Horizontal arrow: label + " ---->" ending at the diagram edge.
+            prefix = label_cells(ra->label);
             prefix.push_back(Cell{' ', Role::Empty, -1});
             for (int i = 0; i < 4; ++i) prefix.push_back(Cell{'-', Role::Pointer, -1});
             prefix.push_back(Cell{'>', Role::Pointer, -1});
+            grid.rows[r].insert(grid.rows[r].begin(), prefix.begin(), prefix.end());
+        } else if (fa != nullptr) {
+            // Elbow lane: label + shaft of dashes running into the diagram up
+            // to the arrowhead column, with a '+' corner turning up to '^'.
+            int head_col = margin + fa->cx; // post-margin arrowhead column
+            std::vector<Cell> lane = label_cells(fa->label);
+            lane.push_back(Cell{' ', Role::Empty, -1});
+            for (int c = static_cast<int>(lane.size()); c < head_col; ++c)
+                lane.push_back(Cell{'-', Role::Pointer, -1});
+            lane.push_back(Cell{'+', Role::Pointer, -1});
+            // Fill the rest of the lane row with blanks.
+            while (static_cast<int>(lane.size()) < margin + static_cast<int>(grid.width()))
+                lane.push_back(Cell{' ', Role::Empty, -1});
+            grid.rows[r] = std::move(lane);
         } else {
             for (int i = 0; i < margin; ++i) prefix.push_back(Cell{' ', Role::Empty, -1});
+            grid.rows[r].insert(grid.rows[r].begin(), prefix.begin(), prefix.end());
         }
-        grid.rows[r].insert(grid.rows[r].begin(), prefix.begin(), prefix.end());
     }
     grid.left_margin = margin;
 }

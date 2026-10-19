@@ -28,7 +28,11 @@ struct BorderSeg {
 
 namespace border_detail {
 inline bool is_horiz(const Cell& c) {
-    return c.role == Role::Border && (c.ch == '-' || c.ch == '+');
+    if (c.role == Role::Border && (c.ch == '-' || c.ch == '+')) return true;
+    // A pointer arrowhead '^' sits inside a horizontal border line; it is
+    // drawn as a glyph, but neighbours should keep their horizontal line.
+    if (c.role == Role::Pointer && c.ch == '^') return true;
+    return false;
 }
 inline bool is_vert(const Cell& c) {
     return c.role == Role::Border && (c.ch == '|' || c.ch == '+' || c.ch == VARLEN_CHAR);

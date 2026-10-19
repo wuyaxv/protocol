@@ -20,8 +20,10 @@
 namespace protocol {
 
 struct SvgOptions {
-    double font_size = 14.0; ///< Base font size in px (SVG scales cleanly anyway)
+    double font_size = 14.0;  ///< Base font size in px (SVG scales cleanly anyway)
     bool transparent = false; ///< Omit the canvas background rectangle
+    bool ascii = false;       ///< Render characters literally (terminal look)
+    std::string font_family;  ///< Preferred font family; empty = modern default stack
 };
 
 /** Renders one or more protocol grids (stacked vertically) as an SVG image. */
