@@ -57,6 +57,10 @@ Style style_for(const Cell& cell, const Theme& theme) {
             s.has_bg = true;
             s.bg = theme.field_fill(cell.field);
             break;
+        case Role::Pointer:
+            s.has_fg = true;
+            s.fg = theme.pointer;
+            break;
         case Role::Empty:
         default:
             break;

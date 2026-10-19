@@ -45,6 +45,7 @@ Color fg_for(const Cell& cell, const Theme& theme, bool& visible) {
         case Role::NumTen:
         case Role::NumUnit: return theme.numbers;
         case Role::FieldText: return theme.text;
+        case Role::Pointer: return theme.pointer;
         default: visible = false; return theme.text;
     }
 }
@@ -118,15 +119,24 @@ std::string render_svg(const std::vector<Grid>& grids, const Theme& theme, const
                        fmt((col - start) * cell_w) + "\" height=\"" + fmt(lw) + "\" fill=\"" +
                        border_hex + "\"/>\n";
             }
-            // 2b. Vertical segments.
+            // 2b. Vertical segments (dashed for '~' variable-length edges).
             for (std::size_t ccol = 0; ccol < row.size(); ++ccol) {
                 BorderSeg seg = border_segments(grid.rows, r, ccol);
                 if (!seg.vline_up && !seg.vline_down) continue;
-                double x = pad_x + ccol * cell_w + cell_w / 2 - lw / 2;
+                double cx = pad_x + ccol * cell_w + cell_w / 2;
                 double y0 = seg.vline_up ? y_off : y_off + cell_h / 2;
                 double y1 = seg.vline_down ? y_off + cell_h : y_off + cell_h / 2;
-                svg += "<rect x=\"" + fmt(x) + "\" y=\"" + fmt(y0) + "\" width=\"" + fmt(lw) +
-                       "\" height=\"" + fmt(y1 - y0) + "\" fill=\"" + border_hex + "\"/>\n";
+                if (seg.dashed) {
+                    std::string dash = fmt(cell_h / 6);
+                    svg += "<line x1=\"" + fmt(cx) + "\" y1=\"" + fmt(y0) + "\" x2=\"" + fmt(cx) +
+                           "\" y2=\"" + fmt(y1) + "\" stroke=\"" + border_hex +
+                           "\" stroke-width=\"" + fmt(lw) + "\" stroke-dasharray=\"" + dash +
+                           " " + dash + "\"/>\n";
+                } else {
+                    svg += "<rect x=\"" + fmt(cx - lw / 2) + "\" y=\"" + fmt(y0) +
+                           "\" width=\"" + fmt(lw) + "\" height=\"" + fmt(y1 - y0) +
+                           "\" fill=\"" + border_hex + "\"/>\n";
+                }
             }
             // 3. Text runs (merge contiguous visible characters of the same
             //    color; each glyph gets an explicit x so alignment does not

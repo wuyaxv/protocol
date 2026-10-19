@@ -37,6 +37,7 @@ struct Theme {
     Color border;                 ///< Border lines and separators
     Color numbers;                ///< Bit-number rows
     Color text;                   ///< Default field label color
+    Color pointer;                ///< Pointer labels and arrows
     std::vector<Color> field_fills; ///< Per-field background fills (cycled)
     bool dark = false;            ///< True if this is a dark theme
 

@@ -19,9 +19,10 @@ namespace protocol {
 
 /** Line segments needed to render one border cell. */
 struct BorderSeg {
-    bool hline = false;     ///< Horizontal line through the cell center
-    bool vline_up = false;  ///< Vertical line from cell top to center
+    bool hline = false;      ///< Horizontal line through the cell center
+    bool vline_up = false;   ///< Vertical line from cell top to center
     bool vline_down = false; ///< Vertical line from center to cell bottom
+    bool dashed = false;     ///< Draw the vertical segments dashed ('~' cells)
     bool any() const { return hline || vline_up || vline_down; }
 };
 
@@ -30,7 +31,7 @@ inline bool is_horiz(const Cell& c) {
     return c.role == Role::Border && (c.ch == '-' || c.ch == '+');
 }
 inline bool is_vert(const Cell& c) {
-    return c.role == Role::Border && (c.ch == '|' || c.ch == '+');
+    return c.role == Role::Border && (c.ch == '|' || c.ch == '+' || c.ch == VARLEN_CHAR);
 }
 } // namespace border_detail
 
@@ -51,6 +52,10 @@ inline BorderSeg border_segments(const std::vector<std::vector<Cell>>& rows, std
             break;
         case '|':
             seg.vline_up = seg.vline_down = true;
+            break;
+        case VARLEN_CHAR: // '~': dashed vertical edge of a variable-length field
+            seg.vline_up = seg.vline_down = true;
+            seg.dashed = true;
             break;
         case '+': {
             const std::vector<Cell>& row = rows[r];

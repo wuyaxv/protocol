@@ -60,15 +60,25 @@ void draw_glyph(Canvas& cv, int x, int y, char ch, int scale, Color color) {
 }
 
 /** Draws a border cell as continuous line segments so that boxes look
- *  properly closed (font glyphs would leave gaps between character rows). */
+ *  properly closed (font glyphs would leave gaps between character rows).
+ *  '~' cells (variable-length field edges) are drawn as dashed verticals. */
 void draw_border_cell(Canvas& cv, int x, int y, int cell_w, int cell_h, const BorderSeg& seg,
                       Color color) {
     const int t = std::max(1, cell_w / 8); // line thickness in px
     const int cx = x + cell_w / 2;
     const int cy = y + cell_h / 2;
     if (seg.hline) cv.fill_rect(x, cy - t / 2, cell_w, t, color);
-    if (seg.vline_up) cv.fill_rect(cx - t / 2, y, t, cy - y, color);
-    if (seg.vline_down) cv.fill_rect(cx - t / 2, cy, t, y + cell_h - cy, color);
+    int y0 = seg.vline_up ? y : cy;
+    int y1 = seg.vline_down ? y + cell_h : cy;
+    if (y1 > y0) {
+        if (seg.dashed) {
+            const int dash = 2 * std::max(1, cell_w / 8);
+            for (int yy = y0; yy < y1; yy += dash * 2)
+                cv.fill_rect(cx - t / 2, yy, t, std::min(dash, y1 - yy), color);
+        } else {
+            cv.fill_rect(cx - t / 2, y0, t, y1 - y0, color);
+        }
+    }
 }
 
 void png_write_to_vector(void* ctx, void* data, int size) {
@@ -129,6 +139,7 @@ std::vector<std::uint8_t> render_png(const std::vector<Grid>& grids, const Theme
                     case Role::NumTen:
                     case Role::NumUnit: color = theme.numbers; break;
                     case Role::FieldText: color = theme.text; break;
+                    case Role::Pointer: color = theme.pointer; break;
                     default: continue;
                 }
                 int x = pad_x + static_cast<int>(col) * cell_w;

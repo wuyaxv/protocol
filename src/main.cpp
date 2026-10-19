@@ -41,7 +41,7 @@
 namespace {
 
 const char* APPLICATION_NAME = "Protocol";
-const char* APPLICATION_VERSION = "1.0.0";
+const char* APPLICATION_VERSION = "1.1.0";
 
 enum class OutputFormat { Text, Svg, Png };
 enum class ColorMode { Auto, Always, Never };
@@ -62,6 +62,7 @@ struct Options {
     int scale = 2;
     bool transparent = false;
     ColorMode color_mode = ColorMode::Auto;
+    std::vector<protocol::Pointer> pointers; // pointer arrows (repeatable)
 };
 
 void display_usage(const char* prog) {
@@ -78,6 +79,9 @@ void display_help(const char* prog) {
     std::printf("\nPARAMETERS:\n");
     std::printf(" <protocol>          : Name of an existing protocol (see --list)\n");
     std::printf(" <spec>              : Field by field specification, e.g. \"Type:8,Code:8,Data:16\"\n");
+    std::printf("                       Suffix a length with '~' or '*' for a variable-length\n");
+    std::printf("                       field (dashed edges); use \\, \\: \\? \\\\ to escape\n");
+    std::printf("                       special characters inside field names.\n");
     std::printf("\nOPTIONS:\n");
     std::printf(" -b, --bits <n>      : Number of bits per line\n");
     std::printf(" -f, --file <file>   : Read protocol specs from a text file\n");
@@ -88,6 +92,8 @@ void display_help(const char* prog) {
     std::printf("     --format <fmt>  : Output format: text, svg or png (default: text)\n");
     std::printf(" -t, --theme <name>  : Color theme (default: none for text, light for svg/png)\n");
     std::printf("     --color <mode>  : ANSI colors for terminal text output: auto, always, never\n");
+    std::printf("     --pointer <l@t> : Draw a pointer arrow: label @ row number or field name\n");
+    std::printf("                       (repeatable; rows count field lines starting at 1)\n");
     std::printf("     --scale <n>     : PNG pixel scale, from 1 to 8 (default: 2)\n");
     std::printf("     --transparent   : Transparent canvas background for PNG/SVG output\n");
     std::printf("     --list          : List built-in protocols\n");
@@ -236,6 +242,13 @@ void parse_cmd_line_args(int argc, char** argv, Options& opts) {
                 fatal(std::string("Invalid PNG scale supplied (") + v + "), use a value 1-8");
         } else if (arg == "--transparent") {
             opts.transparent = true;
+        } else if (arg == "--pointer") {
+            const char* v = need_param(arg.c_str());
+            try {
+                opts.pointers.push_back(protocol::parse_pointer_spec(v));
+            } catch (const protocol::ProtocolException& ex) {
+                fatal(ex.what());
+            }
         } else if (arg == "--list") {
             list_protocols();
             std::exit(0);
@@ -323,7 +336,7 @@ int main(int argc, char** argv) {
     parse_cmd_line_args(argc, argv, opts);
 
     // Apply global overrides to every protocol (same semantics as the
-    // original tool).
+    // original tool), plus any pointer annotations.
     for (auto& p : opts.protocols) {
         if (opts.bits_per_line > 0) p.bits_per_line = opts.bits_per_line;
         if (opts.skip_numbers) {
@@ -335,6 +348,7 @@ int main(int argc, char** argv) {
         if (opts.hdr_char_fill_even) p.hdr_char_fill_even = opts.hdr_char_fill_even;
         if (opts.hdr_char_fill_odd) p.hdr_char_fill_odd = opts.hdr_char_fill_odd;
         if (opts.hdr_char_sep) p.hdr_char_sep = opts.hdr_char_sep;
+        for (const auto& ptr : opts.pointers) p.pointers.push_back(ptr);
     }
 
     const OutputFormat format = detect_format(opts);
@@ -351,18 +365,36 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Lay out every protocol (this resolves pointer annotations; out-of-range
+    // row numbers are clamped with a warning, unknown field names are fatal).
+    std::vector<protocol::Grid> grids;
+    grids.reserve(opts.protocols.size());
+    try {
+        for (const auto& p : opts.protocols) grids.push_back(p.layout());
+    } catch (const protocol::ProtocolException& ex) {
+        std::fprintf(stderr, "ERROR: %s\n", ex.what());
+        return 1;
+    }
+    for (const auto& g : grids)
+        for (const std::string& w : g.warnings) std::fprintf(stderr, "warning: %s\n", w.c_str());
+
+    // Align stacked diagrams that have different pointer margins.
+    int max_margin = 0;
+    for (const auto& g : grids) max_margin = std::max(max_margin, g.left_margin);
+    for (auto& g : grids)
+        if (g.left_margin < max_margin) protocol::pad_grid_left(g, max_margin - g.left_margin);
+
     if (format == OutputFormat::Text) {
         bool use_color = theme->name != "none" &&
                          (opts.color_mode == ColorMode::Always ||
                           (opts.color_mode == ColorMode::Auto && opts.output_file.empty() &&
                            isatty(fileno(stdout))));
         std::string out;
-        for (std::size_t i = 0; i < opts.protocols.size(); ++i) {
-            protocol::Grid grid = opts.protocols[i].layout();
-            out += use_color ? protocol::render_text_ansi(grid, *theme)
-                             : protocol::render_text(grid);
+        for (std::size_t i = 0; i < grids.size(); ++i) {
+            out += use_color ? protocol::render_text_ansi(grids[i], *theme)
+                             : protocol::render_text(grids[i]);
             out += '\n';
-            if (opts.protocols.size() > 1 && i + 1 < opts.protocols.size()) out += '\n';
+            if (grids.size() > 1 && i + 1 < grids.size()) out += '\n';
         }
         if (!opts.output_file.empty()) {
             if (!write_text(opts.output_file, out)) {
@@ -377,9 +409,6 @@ int main(int argc, char** argv) {
     }
 
     // Image formats: stack all protocol diagrams in one canvas.
-    std::vector<protocol::Grid> grids;
-    grids.reserve(opts.protocols.size());
-    for (const auto& p : opts.protocols) grids.push_back(p.layout());
 
     if (format == OutputFormat::Svg) {
         protocol::SvgOptions svg_opts;

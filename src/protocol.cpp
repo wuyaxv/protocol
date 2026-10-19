@@ -15,26 +15,46 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
+#include <set>
 
 namespace protocol {
 
 namespace {
 
-/** Splits a string exactly like Python's str.split(sep): empty input yields
- *  one empty element; consecutive separators yield empty elements. */
-std::vector<std::string> split(const std::string& s, char sep) {
-    std::vector<std::string> out;
-    std::string cur;
-    for (char c : s) {
-        if (c == sep) {
-            out.push_back(cur);
-            cur.clear();
-        } else {
-            cur += c;
+/** Trims whitespace at both ends. */
+std::string trim(const std::string& s) {
+    std::size_t b = s.find_first_not_of(" \t\n\r\f\v");
+    if (b == std::string::npos) return "";
+    std::size_t e = s.find_last_not_of(" \t\n\r\f\v");
+    return s.substr(b, e - b + 1);
+}
+
+/** Returns the position of the first unescaped occurrence of `target`
+ *  at or after `start`, or npos. A character preceded by an odd number of
+ *  backslashes is escaped and skipped. */
+std::size_t find_unescaped(const std::string& s, char target, std::size_t start = 0) {
+    for (std::size_t i = start; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            ++i; // skip the escaped character
+            continue;
         }
+        if (s[i] == target) return i;
     }
-    out.push_back(cur);
-    return out;
+    return std::string::npos;
+}
+
+/** Returns the position of the last unescaped occurrence of `target`. */
+std::size_t find_last_unescaped(const std::string& s, char target) {
+    std::size_t found = std::string::npos;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            ++i;
+            continue;
+        }
+        if (s[i] == target) found = i;
+    }
+    return found;
 }
 
 std::string to_lower(std::string s) {
@@ -99,42 +119,121 @@ void push_centered_field(std::vector<Cell>& row, const std::string& text, long w
 
 } // namespace
 
+namespace detail {
+
+std::vector<std::string> split_escaped(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '\\' && i + 1 < s.size()) {
+            cur += c;
+            cur += s[++i]; // keep the escape sequence; unescape later
+        } else if (c == sep) {
+            out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+
+std::string unescape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\\' && i + 1 < s.size()) {
+            out += s[++i];
+        } else {
+            out += s[i]; // includes a trailing lone backslash, kept literally
+        }
+    }
+    return out;
+}
+
+bool ends_with_unescaped(const std::string& s, char c) {
+    if (s.empty() || s.back() != c) return false;
+    std::size_t backslashes = 0;
+    for (std::size_t i = s.size() - 1; i > 0 && s[i - 1] == '\\'; --i) ++backslashes;
+    return (backslashes % 2) == 0;
+}
+
+} // namespace detail
+
+void pad_grid_left(Grid& grid, int extra) {
+    if (extra <= 0) return;
+    for (auto& row : grid.rows)
+        row.insert(row.begin(), static_cast<std::size_t>(extra), Cell{' ', Role::Empty, -1});
+    grid.left_margin += extra;
+}
+
+Pointer parse_pointer_spec(const std::string& s) {
+    std::size_t pos = find_last_unescaped(s, '@');
+    if (pos == std::string::npos) pos = find_last_unescaped(s, ':');
+    if (pos == std::string::npos)
+        throw ProtocolException("FATAL: Invalid pointer specification (" + s +
+                                "), expected \"label@row\" or \"label@field\".");
+    Pointer p;
+    p.label = detail::unescape(trim(s.substr(0, pos)));
+    p.target = detail::unescape(trim(s.substr(pos + 1)));
+    if (p.target.empty())
+        throw ProtocolException("FATAL: Invalid pointer specification (" + s +
+                                "), missing target after the separator.");
+    return p;
+}
+
 void Protocol::parse_spec(const std::string& spec) {
     std::string fields_part = spec;
     std::string opts_part;
     bool has_opts = false;
 
-    std::size_t qpos = spec.find('?');
+    // The '?' separating fields from options must not be escaped ("\?" is a
+    // literal question mark inside a field name).
+    std::size_t qpos = find_unescaped(spec, '?');
     if (qpos != std::string::npos) {
-        if (spec.find('?', qpos + 1) != std::string::npos)
+        if (find_unescaped(spec, '?', qpos + 1) != std::string::npos)
             throw ProtocolException("FATAL: Character '?' may only be used as an option separator.");
         fields_part = spec.substr(0, qpos);
         opts_part = spec.substr(qpos + 1);
         has_opts = true;
     }
 
-    // Parse field spec
-    for (const std::string& item : split(fields_part, ',')) {
-        std::vector<std::string> parts = split(item, ':');
+    // Parse field spec (escape-aware: "\,", "\:" etc. do not split).
+    for (const std::string& item : detail::split_escaped(fields_part, ',')) {
+        std::vector<std::string> parts = detail::split_escaped(item, ':');
         if (parts.size() != 2)
             throw ProtocolException("FATAL: Invalid field_list specification (" + spec + ")");
+        std::string name = detail::unescape(parts[0]);
+        // A trailing '~' or '*' marks a variable-length (undefined length)
+        // field; the number is its nominal display length.
+        std::string len_raw = parts[1];
+        bool varlen = false;
+        if (detail::ends_with_unescaped(len_raw, '~') ||
+            detail::ends_with_unescaped(len_raw, '*')) {
+            varlen = true;
+            len_raw.pop_back();
+        }
         bool ok = false;
-        int bits = py_int(parts[1], ok);
+        int bits = py_int(detail::unescape(len_raw), ok);
         if (!ok)
             throw ProtocolException("FATAL: Invalid field_list specification (" + spec + ")");
         if (bits <= 0)
             throw ProtocolException("FATAL: Fields must be at least one bit long (" + spec + ")");
-        field_list_.push_back(Field{parts[0], bits, false, static_cast<int>(field_list_.size())});
+        field_list_.push_back(
+            Field{name, bits, false, static_cast<int>(field_list_.size()), varlen});
     }
 
     // Parse options
     if (has_opts) {
-        for (const std::string& opt : split(opts_part, ',')) {
-            std::vector<std::string> kv = split(opt, '=');
+        for (const std::string& opt : detail::split_escaped(opts_part, ',')) {
+            std::vector<std::string> kv = detail::split_escaped(opt, '=');
             if (kv.size() != 2)
                 throw ProtocolException("FATAL: Invalid options specification (" + opt + ")");
-            std::string var = to_lower(kv[0]);
-            const std::string& value = kv[1];
+            std::string var = to_lower(detail::unescape(kv[0]));
+            const std::string& raw_value = kv[1];
+            std::string value = detail::unescape(raw_value);
             if (var == "bits") {
                 bool ok = false;
                 int b = py_int(value, ok);
@@ -163,6 +262,10 @@ void Protocol::parse_spec(const std::string& spec) {
                 else if (var == "startchar") hdr_char_start = value[0];
                 else if (var == "endchar") hdr_char_end = value[0];
                 else hdr_char_sep = value[0];
+            } else if (var == "pointer") {
+                // Pass the raw (still escaped) value; parse_pointer_spec
+                // resolves escapes itself after splitting label and target.
+                pointers.push_back(parse_pointer_spec(raw_value));
             }
             // Unknown options are silently ignored (same as the original tool).
         }
@@ -198,12 +301,12 @@ std::vector<Protocol::Field> Protocol::process_field_list() const {
             } else {
                 // Case 2: split the field into two fragments.
                 if (available_in_line >= field_len - available_in_line) {
-                    new_fields.push_back(Field{field_text, available_in_line, true, field.id});
+                    new_fields.push_back(Field{field_text, available_in_line, true, field.id, field.varlen});
                     field.text = "";
                     field.len = field_len - available_in_line;
                     field.mf = false;
                 } else {
-                    new_fields.push_back(Field{"", available_in_line, true, field.id});
+                    new_fields.push_back(Field{"", available_in_line, true, field.id, field.varlen});
                     field.text = field_text;
                     field.len = field_len - available_in_line;
                     field.mf = false;
@@ -346,7 +449,131 @@ Grid Protocol::layout() const {
         }
     }
 
+    // ---- Variable-length fields: dashed edges -------------------------
+    // Replace every border cell that is horizontally adjacent to a
+    // variable-length field's interior with VARLEN_CHAR ('~'), producing
+    // RFC-style dashed box sides. This uniform post-pass covers field
+    // lines, multi-line big fields and merged border lines alike.
+    {
+        std::set<int> varlen_ids;
+        for (const Field& f : proto_fields)
+            if (f.varlen) varlen_ids.insert(f.id);
+        if (!varlen_ids.empty()) {
+            for (auto& row : grid.rows) {
+                for (std::size_t i = 0; i < row.size(); ++i) {
+                    const Cell& c = row[i];
+                    if ((c.role == Role::FieldBg || c.role == Role::FieldText) &&
+                        c.field >= 0 && varlen_ids.count(c.field)) {
+                        if (i > 0 && row[i - 1].role == Role::Border)
+                            row[i - 1].ch = VARLEN_CHAR;
+                        if (i + 1 < row.size() && row[i + 1].role == Role::Border)
+                            row[i + 1].ch = VARLEN_CHAR;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Pointer annotations -------------------------------------------
+    if (!pointers.empty()) attach_pointers(grid);
+
     return grid;
+}
+
+void Protocol::attach_pointers(Grid& grid) const {
+    // Content rows are the diagram lines that display field interiors (this
+    // covers normal field lines, multi-line big-field interiors and merged
+    // continuation lines). Row numbers seen by users count these, 1-based.
+    std::vector<std::size_t> content_rows;
+    std::map<int, std::size_t> field_first_row;
+    for (std::size_t r = 0; r < grid.rows.size(); ++r) {
+        bool has_field = false;
+        for (const Cell& c : grid.rows[r]) {
+            if (c.field >= 0 && (c.role == Role::FieldBg || c.role == Role::FieldText)) {
+                has_field = true;
+                auto it = field_first_row.find(c.field);
+                if (it == field_first_row.end() || r < it->second)
+                    field_first_row[c.field] = r;
+            }
+        }
+        if (has_field) content_rows.push_back(r);
+    }
+    if (content_rows.empty()) return; // no place to point at
+
+    // Resolve every pointer target to a grid row.
+    std::vector<std::pair<std::size_t, std::string>> by_row; // row -> label
+    for (const Pointer& p : pointers) {
+        std::size_t row = 0;
+        bool is_int = false;
+        int rownum = py_int(p.target, is_int);
+        if (is_int) {
+            // Smart placement: clamp out-of-range row numbers instead of
+            // failing, and tell the user about it on stderr (via warnings).
+            int n = static_cast<int>(content_rows.size());
+            int clamped = std::max(1, std::min(n, rownum));
+            if (clamped != rownum) {
+                grid.warnings.push_back("pointer '" +
+                                        (p.label.empty() ? p.target : p.label) + "': row " +
+                                        std::to_string(rownum) + " out of range (1-" +
+                                        std::to_string(n) + "), clamped to " +
+                                        std::to_string(clamped));
+            }
+            row = content_rows[static_cast<std::size_t>(clamped) - 1];
+        } else {
+            // Field name target (case-insensitive).
+            std::string want = to_lower(trim(p.target));
+            int fid = -1;
+            for (const Field& f : field_list_) {
+                if (to_lower(f.text) == want) {
+                    fid = f.id;
+                    break;
+                }
+            }
+            auto it = field_first_row.find(fid);
+            if (fid < 0 || it == field_first_row.end()) {
+                std::string avail;
+                for (const Field& f : field_list_) {
+                    if (!avail.empty()) avail += ", ";
+                    avail += "'" + f.text + "'";
+                }
+                throw ProtocolException("FATAL: pointer refers to unknown field '" + p.target +
+                                        "' (available fields: " + avail + ")");
+            }
+            row = it->second;
+        }
+        // Several pointers may share a row: merge their labels.
+        auto existing = std::find_if(by_row.begin(), by_row.end(),
+                                     [&](const auto& e) { return e.first == row; });
+        if (existing == by_row.end())
+            by_row.push_back({row, p.label});
+        else if (existing->second.empty())
+            existing->second = p.label;
+        else if (!p.label.empty())
+            existing->second += ", " + p.label;
+    }
+
+    // Build the left margin: right-aligned label + " " + 4-dash shaft + '>'.
+    std::size_t max_label = 0;
+    for (const auto& e : by_row) max_label = std::max(max_label, e.second.size());
+    const int margin = static_cast<int>(max_label + 6);
+    for (std::size_t r = 0; r < grid.rows.size(); ++r) {
+        std::vector<Cell> prefix;
+        const std::string* lbl = nullptr;
+        for (const auto& e : by_row)
+            if (e.first == r) lbl = &e.second;
+        if (lbl != nullptr) {
+            for (std::size_t i = lbl->size(); i < max_label; ++i)
+                prefix.push_back(Cell{' ', Role::Empty, -1});
+            for (char c : *lbl) prefix.push_back(Cell{c, Role::Pointer, -1});
+            prefix.push_back(Cell{' ', Role::Empty, -1});
+            for (int i = 0; i < 4; ++i) prefix.push_back(Cell{'-', Role::Pointer, -1});
+            prefix.push_back(Cell{'>', Role::Pointer, -1});
+        } else {
+            for (int i = 0; i < margin; ++i) prefix.push_back(Cell{' ', Role::Empty, -1});
+        }
+        grid.rows[r].insert(grid.rows[r].begin(), prefix.begin(), prefix.end());
+    }
+    grid.left_margin = margin;
 }
 
 std::string Protocol::to_string() const {

@@ -16,6 +16,12 @@ extended with:
 * **PNG image export** — crisp pixel-art diagrams, no external dependencies
 * **SVG image export** — clean vector diagrams for documents and slides
 * **12 color themes** — for images *and* terminal output (ANSI truecolor)
+* **Variable-length fields** — dashed edges (`~`) mark fields whose length is
+  not fixed, RFC 8300 style
+* **Pointer arrows** — annotate rows or fields with labeled arrows
+  (`--pointer "Pointer@3"`)
+* **Escape sequences** — field names may contain `,`, `:`, `?` and more via
+  backslash escapes (`"Seq\\, Nr:8"`)
 * Multiple protocols can be stacked into a single image
 
 The ASCII output is byte-for-byte compatible with the original Python tool
@@ -48,6 +54,9 @@ The ASCII output is byte-for-byte compatible with the original Python tool
     - [Displaying built-in protocols](#displaying-built-in-protocols)
     - [Built-in protocols](#built-in-protocols)
     - [Custom protocol specifications](#custom-protocol-specifications)
+    - [Escape sequences](#escape-sequences)
+    - [Variable-length fields](#variable-length-fields)
+    - [Pointer arrows](#pointer-arrows)
     - [Reading specs from a file](#reading-specs-from-a-file)
     - [Output formats](#output-formats)
     - [Color themes](#color-themes)
@@ -78,11 +87,16 @@ The ASCII output is byte-for-byte compatible with the original Python tool
     - [显示内置协议](#显示内置协议)
     - [内置协议列表](#内置协议列表)
     - [自定义协议规格](#自定义协议规格)
+    - [转义序列](#转义序列)
+    - [变长字段](#变长字段)
+    - [指针箭头](#指针箭头)
     - [从文件读取规格](#从文件读取规格)
     - [输出格式](#输出格式)
     - [颜色主题](#颜色主题)
     - [退出状态码](#退出状态码)
   - [命令示例](#命令示例)
+  - [项目结构](#项目结构)
+  - [测试](#测试)
   - [许可证](#许可证)
 
 ## Features
@@ -94,8 +108,12 @@ The ASCII output is byte-for-byte compatible with the original Python tool
   syntax: `"Type:8,Code:8,Checksum:16,Payload:64"`.
 * Fields of any bit length; fields that do not fit on one line are wrapped
   automatically with merged border lines, just like in RFC diagrams.
+* Fields of **variable/undefined length** render with dashed `~` edges;
+  **pointer arrows** can annotate any row or field.
 * Configurable bits per line, optional bit-number rows, custom border
   characters.
+* Field names may contain special characters via **backslash escapes**
+  (`\,`, `\:`, `\?`, `\\`, ...).
 * Three output formats: **text** (plain or ANSI-colored), **SVG**, **PNG**.
 * **Zero external dependencies**: the PNG encoder (stb_image_write) and the
   8x8 bitmap font are embedded in the repository (both public domain). Only a
@@ -233,16 +251,18 @@ documentation; the CMake build applies it to that file only.)
 
 ### Verifying the build
 
-Run the regression test suite (compares the output against golden files
-produced by the original Python implementation):
+Run the regression test suite (golden/integration tests comparing against the
+original Python implementation, plus the unit tests):
 
 ```sh
-./tests/run_tests.sh
-# or through CTest:
+./build/protocol_unit_tests   # unit tests for the core library
+./tests/run_tests.sh          # golden/integration tests
+# or everything through CTest:
 ctest --test-dir build --output-on-failure
 ```
 
-Expected result: `passed: 55, failed: 0`.
+Expected result: `passed: 81, failed: 0` and a zero exit status from
+`protocol_unit_tests`.
 
 ## Usage
 
@@ -280,6 +300,7 @@ another (stacked into a single canvas for image formats).
 | **Color** | |
 | `-t, --theme <name>` | Color theme (default: `none` for text output, `light` for svg/png); see `protocol --list-themes` |
 | `--color <mode>` | ANSI colors for terminal text output: `auto` (only when stdout is a TTY), `always`, `never` (default: `auto`) |
+| `--pointer <l@t>` | Add a pointer arrow with label `l` targeting row number or field name `t` (repeatable); see [Pointer arrows](#pointer-arrows) |
 | **PNG / SVG** | |
 | `--scale <n>` | PNG pixel scale, integer 1–8 (default: 2; one character cell = 8x12 font pixels x scale) |
 | `--transparent` | Transparent canvas background for PNG/SVG output |
@@ -358,10 +379,11 @@ Ambiguous protocol specifier 'icmpv6-r'. Did you mean any of these?
 A spec has the form `"<FIELD_LIST>[?OPTIONS]"`:
 
 * **FIELD_LIST** — a comma-separated list of `name:length` tuples. `name` is
-  the field label (it may contain any character except `?`, `,` and `:`;
-  quote the whole spec in your shell if it contains spaces). `length` is an
-  integer > 0: the field width in bits. Do **not** put whitespace after the
-  commas.
+  the field label (see [Escape sequences](#escape-sequences) for using `,`,
+  `:` or `?` inside names). `length` is an integer > 0: the field width in
+  bits; suffix it with `~` or `*` to mark a
+  [variable-length field](#variable-length-fields) (`Payload:64~`). Do **not**
+  put whitespace after the commas.
 * **OPTIONS** — an optional comma-separated list of `key=value` modifiers,
   introduced by a `?`.
 
@@ -370,6 +392,8 @@ Examples of field lists:
 ```
 Type:8,Code:8,Checksum:16,Message Body:64
 Source Port:16,Destination Port:16,Length:16,Checksum:16
+Payload:64~                          # variable-length field (dashed edges)
+Seq\, Nr:8,What\:ify\?:8             # escaped ',' and ':'/'?' in names
 ```
 
 Field lengths don't need to align to the line width; long fields wrap to the
@@ -397,6 +421,98 @@ Available per-spec options:
 | `startchar=<c>` | single char | First character of horizontal borders (default `+`) |
 | `endchar=<c>` | single char | Last character of horizontal borders (default `+`) |
 | `sepchar=<c>` | single char | Field separator character (default `\|`) |
+| `pointer=<l@t>` | label + target | Add a [pointer arrow](#pointer-arrows): `pointer=Pointer@3` or `pointer=Pointer@Checksum`; repeatable |
+
+### Escape sequences
+
+Field names (and pointer labels) may contain characters that are otherwise
+special in a spec. Prefix them with a backslash to use them literally:
+
+| Escape | Result | Where it matters |
+|---|---|---|
+| `\,` | a literal `,` | field lists and option lists would otherwise split there |
+| `\:` | a literal `:` | would otherwise separate name from length |
+| `\?` | a literal `?` | would otherwise start the options part |
+| `\=` | a literal `=` | would otherwise separate option key from value |
+| `\~`, `\*` | literal `~`, `*` | a trailing one would otherwise mark a variable-length field |
+| `\\` | a literal `\` | the escape character itself |
+
+Any other character after `\` is also taken literally. A lone backslash at
+the very end is kept as-is.
+
+```
+$ protocol "Seq\, Nr:8,What\:ify\?:8,Code:16"
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|    Seq, Nr    |   What:ify?   |              Code             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+### Variable-length fields
+
+Suffix a field's length with `~` (or `*`) to declare it **variable-length**
+(undefined length): the number is only the nominal display length, and the
+field's vertical edges are drawn dashed (`~` in ASCII, dashed lines in
+SVG/PNG), following the RFC 8300 convention. The rest of the layout —
+wrapping, merged borders, bit numbers — works as usual.
+
+```
+$ protocol "Type:8,Payload:32~,CRC:16"
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      Type     ~                    Payload                    ~
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+~               ~              CRC              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+![Variable-length field with dashed edges, dark theme](examples/varlen_pointer_dark.png)
+
+### Pointer arrows
+
+`--pointer "label@target"` draws a labeled arrow at the left of a diagram
+row, e.g. `--pointer "Pointer@3"`. It can be repeated, and is also available
+per spec as the `pointer=` option (repeatable as well):
+
+```
+protocol tcp --pointer "Pointer@3"
+protocol "Type:8,Data:16,Code:8?pointer=Ptr@Data"
+```
+
+The **target** may be:
+
+* a **content row number** (1-based; content rows are the diagram lines that
+  carry fields — bit-number rows and pure border lines are not counted);
+* a **field name** (case-insensitive) — the arrow points at the first row
+  where that field starts, even if the field wraps across lines.
+
+Placement is **smart**:
+
+* an out-of-range row number is clamped to the nearest valid row and a
+  warning is printed to stderr (the command still succeeds);
+* an unknown field name is a clean error listing the available field names;
+* several pointers on the same row have their labels merged
+  (`"First, Also ---->"`);
+* labels are right-aligned so arrows line up, and when several protocols are
+  stacked into one image their diagrams are aligned automatically;
+* labels support the same [escape sequences](#escape-sequences)
+  (`--pointer "Start\\, middle@1"`).
+
+```
+$ protocol udp --pointer "Source ports@1" --pointer "Ptr@Checksum"
+                   0                   1                   2                   3
+                   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+Source ports ---->|          Source Port          |        Destination Port       |
+                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+         Ptr ---->|             Length            |            Checksum           |
+                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+Pointer labels and arrows are colored with the theme's accent color
+(text via ANSI, SVG/PNG via the theme palette).
 
 The following diagram shows where each character modifier applies:
 
@@ -536,6 +652,17 @@ protocol -f my_protocols.txt -o all.svg --theme forest
 # 13. Short unique prefixes work
 protocol et              # == protocol ethernet
 protocol s7_h            # == protocol s7_header
+
+# 14. Variable-length field (dashed '~' edges)
+protocol "Type:8,Payload:64~,CRC:16"
+protocol "Type:8,Payload:64~,CRC:16" -o varlen.png --theme dark
+
+# 15. Pointer arrows
+protocol tcp --pointer "Pointer@3"
+protocol udp --pointer "Ptr@Checksum" -o udp.svg --theme ocean
+
+# 16. Escaped special characters in field names
+protocol "Seq\\, Nr:8,What\\:ify\\?:8,Code:16"
 ```
 
 ## Project layout
@@ -559,26 +686,33 @@ protocol/
 │   ├── font8x8_basic.h     # 8x8 bitmap font (public domain)
 │   └── README.md           # Attribution & license notes
 ├── tests/
-│   ├── run_tests.sh        # Regression test runner
-│   └── golden/*.txt        # Golden ASCII outputs (original Python tool)
+│   ├── test_unit.cpp       # Framework-free unit tests (core library)
+│   ├── run_tests.sh        # Golden/integration test runner
+│   └── golden/*.txt        # Golden ASCII outputs (original Python tool + new features)
 └── examples/               # Sample images generated with this tool
 ```
 
 ## Testing
 
 ```sh
-./tests/run_tests.sh        # or: ctest --test-dir build --output-on-failure
+./build/protocol_unit_tests     # unit tests (or via ctest below)
+./tests/run_tests.sh            # golden/integration tests
+ctest --test-dir build --output-on-failure   # both, through CTest
 ```
 
 The suite:
 
-1. Compares the ASCII output of this C++ implementation against golden files
-   generated with the original Python tool — all 40 built-in protocols plus
-   edge cases (custom bits-per-line, custom border characters, fields spanning
-   multiple lines, hidden bit numbers, multiple protocols at once).
-2. Sanity-checks SVG output (well-formed document) and PNG output (magic
-   bytes).
-3. Checks that invalid specifications fail with exit status 1.
+1. **Unit tests** (`tests/test_unit.cpp`, framework-free): escape-aware
+   splitting/unescaping, variable-length parsing and layout, pointer spec
+   parsing, pointer resolution (row numbers, field names, clamping, label
+   merging, alignment) and grid helpers — ~95 checks.
+2. **Golden/integration tests** (`tests/run_tests.sh`): the ASCII output is
+   compared byte-for-byte against golden files — all 40 built-in protocols
+   plus edge cases generated with the original Python tool, plus golden files
+   for the new features (variable-length fields, pointer arrows, escapes).
+   Also covered: SVG sanity (well-formed, dashed edges, pointer labels), PNG
+   sanity (magic bytes, including with pointers/dashed fields), pointer
+   clamping warnings, and error handling (invalid specs must exit 1).
 
 ## Third-party components
 
@@ -609,6 +743,9 @@ ASCII 输出与原版**逐字节一致**（`tests/` 中有回归测试保证）�
 * **PNG 图片导出** —— 像素风位图，零外部依赖
 * **SVG 图片导出** —— 适合文档与幻灯片的矢量图
 * **12 种颜色主题** —— 图片和终端输出（ANSI 真彩色）均支持
+* **变长字段虚线** —— 用 `~` 虚线边框标记长度未定义的字段（RFC 8300 风格）
+* **指针箭头** —— 用带标签的箭头标注任意行或字段（`--pointer "Pointer@3"`）
+* **转义序列** —— 字段名可包含 `,`、`:`、`?` 等特殊字符（如 `"Seq\\, Nr:8"`）
 * 多个协议可堆叠到同一张图片中
 
 ## 目录
@@ -616,6 +753,9 @@ ASCII 输出与原版**逐字节一致**（`tests/` 中有回归测试保证）�
 * [功能特性](#功能特性)
 * [编译安装](#编译安装)
 * [使用方法](#使用方法)
+  * [转义序列](#转义序列)
+  * [变长字段](#变长字段)
+  * [指针箭头](#指针箭头)
 * [命令示例](#命令示例)
 * [项目结构](#项目结构)
 * [测试](#测试)
@@ -627,7 +767,9 @@ ASCII 输出与原版**逐字节一致**（`tests/` 中有回归测试保证）�
   DHCP、Modbus-TCP、Profinet-RT、DNP3、TSAP、COTP、S7 等），直接在终端打印 RFC 风格图表。
 * 用一行规格描述即可生成**自定义协议**图表：`"Type:8,Code:8,Checksum:16,Payload:64"`。
 * 字段可为任意比特长度；放不下的字段自动折行，边框按 RFC 风格合并。
+* **变长字段**用 `~` 虚线边缘表示；**指针箭头**可标注任意行或字段。
 * 可配置每行比特数、可隐藏比特序号行、可自定义边框字符。
+* 字段名支持**反斜杠转义**（`\,`、`\:`、`\?`、`\\` 等）。
 * 三种输出格式：**文本**（纯 ASCII 或 ANSI 彩色）、**SVG**、**PNG**。
 * **零外部依赖**：PNG 编码器（stb_image_write）与 8x8 点阵字体已内嵌（均为 public domain），
   只需 C++17 编译器和 CMake。
@@ -755,11 +897,11 @@ c++ -std=c++17 -O2 -fno-strict-aliasing -Isrc -Ithird_party \
 
 ```sh
 ./tests/run_tests.sh
-# 或通过 CTest：
+# 或通过 CTest（同时运行单元测试与集成测试）：
 ctest --test-dir build --output-on-failure
 ```
 
-预期结果：`passed: 55, failed: 0`。
+预期结果：`passed: 81, failed: 0`，且 `protocol_unit_tests` 返回 0。
 
 ## 使用方法
 
@@ -795,6 +937,7 @@ protocol {<协议名> 或 <协议规格>} [选项]
 | **颜色** | |
 | `-t, --theme <名称>` | 颜色主题（文本默认 `none`，图片默认 `light`）；见 `protocol --list-themes` |
 | `--color <模式>` | 终端 ANSI 彩色：`auto`（仅当 stdout 是终端时启用）、`always`、`never`（默认 `auto`） |
+| `--pointer <标签@目标>` | 添加指针箭头：标签 @ 行号或字段名（可重复）；详见[指针箭头](#指针箭头) |
 | **PNG / SVG** | |
 | `--scale <n>` | PNG 像素缩放，整数 1–8（默认 2；一个字符格 = 8x12 字体像素 x 缩放） |
 | `--transparent` | PNG/SVG 使用透明画布背景 |
@@ -871,9 +1014,10 @@ Ambiguous protocol specifier 'icmpv6-r'. Did you mean any of these?
 
 规格格式：`"<字段列表>[?选项]"`：
 
-* **字段列表** —— 逗号分隔的 `名称:长度` 元组。`名称` 是字段标签（可包含除 `?`、`,`、`:` 之外的任意字符；
-  含空格时请用引号包住整个规格）。`长度` 为大于 0 的整数，表示字段占用的比特数。
-  逗号后**不要**留空格。
+* **字段列表** —— 逗号分隔的 `名称:长度` 元组。`名称` 是字段标签（若需包含
+  `,`、`:`、`?` 等特殊字符请使用[转义序列](#转义序列)）。`长度` 为大于 0 的整数，
+  表示字段占用的比特数；在长度后加 `~` 或 `*` 可标记为[变长字段](#变长字段)
+  （如 `Payload:64~`）。逗号后**不要**留空格。
 * **选项** —— 可选，以 `?` 开头，逗号分隔的 `键=值` 列表。
 
 字段列表示例：
@@ -881,6 +1025,8 @@ Ambiguous protocol specifier 'icmpv6-r'. Did you mean any of these?
 ```
 Type:8,Code:8,Checksum:16,Message Body:64
 Source Port:16,Destination Port:16,Length:16,Checksum:16
+Payload:64~                          # 变长字段（虚线边缘）
+Seq\, Nr:8,What\:ify\?:8             # 名称中含转义的 ',' 和 ':'/'?'
 ```
 
 字段长度不需要与行宽对齐，过长的字段会自动折行：
@@ -907,6 +1053,88 @@ $ protocol "Source:16,TTL:8,Reserved:40"
 | `startchar=<字符>` | 单个字符 | 水平边框起始字符（默认 `+`） |
 | `endchar=<字符>` | 单个字符 | 水平边框结束字符（默认 `+`） |
 | `sepchar=<字符>` | 单个字符 | 字段分隔字符（默认 `\|`） |
+| `pointer=<标签@目标>` | 标签+目标 | 添加[指针箭头](#指针箭头)：`pointer=Pointer@3` 或 `pointer=Pointer@Checksum`；可重复 |
+
+### 转义序列
+
+字段名（以及指针标签）可以包含规格中的特殊字符：在其前面加反斜杠即可按字面量使用：
+
+| 转义 | 结果 | 不转义时的影响 |
+|---|---|---|
+| `\,` | 字面 `,` | 会被当作字段/选项分隔符而报错 |
+| `\:` | 字面 `:` | 会被当作名称与长度的分隔符 |
+| `\?` | 字面 `?` | 会被当作选项部分的起始符 |
+| `\=` | 字面 `=` | 会被当作选项键值分隔符 |
+| `\~`、`\*` | 字面 `~`、`*` | 长度末尾的这两个字符会被当作变长标记 |
+| `\\` | 字面 `\` | 转义字符本身 |
+
+`\` 后接其他任意字符同样按字面量处理；规格末尾的孤立 `\` 会原样保留。
+
+```
+$ protocol "Seq\, Nr:8,What\:ify\?:8,Code:16"
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|    Seq, Nr    |   What:ify?   |              Code             |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+### 变长字段
+
+在字段长度后加 `~`（或 `*`）即可声明**变长字段**（长度未定义）：该数字只是
+图示用的标称长度，字段的竖直边缘将绘制为虚线（ASCII 中为 `~`，SVG/PNG 中为
+虚线线段），遵循 RFC 8300 的惯例。其余布局行为（折行、合并边框、比特序号）
+照常工作。
+
+```
+$ protocol "Type:8,Payload:32~,CRC:16"
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      Type     ~                    Payload                    ~
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+~               ~              CRC              |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+![变长字段虚线与指针箭头（dark 主题）](examples/varlen_pointer_dark.png)
+
+### 指针箭头
+
+`--pointer "标签@目标"` 在图表某一行的左侧绘制带标签的箭头，例如
+`--pointer "Pointer@3"`。该选项可重复使用；规格内也可用 `pointer=` 选项
+（同样可重复）：
+
+```
+protocol tcp --pointer "Pointer@3"
+protocol "Type:8,Data:16,Code:8?pointer=Ptr@Data"
+```
+
+**目标**可以是：
+
+* **内容行号**（从 1 开始；内容行指承载字段的行——比特序号行和纯边框行不计入）；
+* **字段名**（大小写不敏感）——箭头指向该字段开始的第一行，即使字段跨行折行。
+
+位置处理是**智能**的：
+
+* 行号越界时自动钳位到最近的有效行，并在 stderr 打印警告（命令仍成功）；
+* 字段名不存在时给出清晰的错误信息并列出可用字段名；
+* 多个指针指向同一行时标签自动合并（`"First, Also ---->"`）；
+* 标签自动右对齐使箭头对齐；多协议堆叠成一张图片时图表也会自动对齐；
+* 标签支持同样的[转义序列](#转义序列)（如 `--pointer "Start\\, middle@1"`）。
+
+```
+$ protocol udp --pointer "Source ports@1" --pointer "Ptr@Checksum"
+                   0                   1                   2                   3
+                   0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+Source ports ---->|          Source Port          |        Destination Port       |
+                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+         Ptr ---->|             Length            |            Checksum           |
+                  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
+
+指针标签与箭头使用主题的强调色绘制（文本走 ANSI 真彩色，SVG/PNG 走主题调色板）。
 
 各字符修饰符作用位置示意：
 
@@ -1034,7 +1262,64 @@ protocol -f my_protocols.txt -o all.svg --theme forest
 # 13. 协议名可写唯一前缀
 protocol et              # 等价于 protocol ethernet
 protocol s7_h            # 等价于 protocol s7_header
+
+# 14. 变长字段（虚线 '~' 边缘）
+protocol "Type:8,Payload:64~,CRC:16"
+protocol "Type:8,Payload:64~,CRC:16" -o varlen.png --theme dark
+
+# 15. 指针箭头
+protocol tcp --pointer "Pointer@3"
+protocol udp --pointer "Ptr@Checksum" -o udp.svg --theme ocean
+
+# 16. 字段名中的转义特殊字符
+protocol "Seq\\, Nr:8,What\\:ify\\?:8,Code:16"
 ```
+
+## 项目结构
+
+```
+protocol/
+├── CMakeLists.txt          # CMake 构建定义（C++17，零依赖）
+├── README.md               # 本文档
+├── LICENSE.txt             # GNU GPL v3
+├── src/
+│   ├── main.cpp            # 命令行接口
+│   ├── protocol.hpp/.cpp   # 核心布局引擎（规格解析、转义、变长、指针）
+│   ├── specs.hpp/.cpp      # 40 个内置协议规格
+│   ├── theme.hpp/.cpp      # 颜色主题定义
+│   ├── border_lines.hpp    # 边框字符 -> 连续线段（含 '~' 虚线）
+│   ├── render_text.hpp/.cpp    # ASCII / ANSI 真彩色渲染器
+│   ├── render_svg.hpp/.cpp     # SVG 渲染器
+│   └── render_png.hpp/.cpp     # PNG 渲染器（内嵌 8x8 点阵字体）
+├── third_party/
+│   ├── stb_image_write.h   # PNG 编码器（public domain）
+│   ├── font8x8_basic.h     # 8x8 点阵字体（public domain）
+│   └── README.md           # 第三方组件声明
+├── tests/
+│   ├── test_unit.cpp       # 无框架单元测试（核心库）
+│   ├── run_tests.sh        # 黄金/集成测试脚本
+│   └── golden/*.txt        # 黄金输出（原 Python 工具 + 新特性）
+└── examples/               # 本工具生成的示例图片
+```
+
+## 测试
+
+```sh
+./build/protocol_unit_tests     # 单元测试
+./tests/run_tests.sh            # 黄金/集成测试
+ctest --test-dir build --output-on-failure   # 通过 CTest 运行两者
+```
+
+测试内容：
+
+1. **单元测试**（`tests/test_unit.cpp`，无框架）：转义分割/还原、变长字段解析与布局、
+   指针规格解析、指针定位（行号、字段名、钳位、标签合并、对齐）与网格辅助函数，
+   约 95 项检查。
+2. **黄金/集成测试**（`tests/run_tests.sh`）：ASCII 输出与黄金文件逐字节比对——
+   覆盖全部 40 个内置协议及由原 Python 工具生成的边界用例，以及新特性的黄金文件
+   （变长字段、指针箭头、转义）。还包括：SVG 健全性（格式合法、虚线、指针标签）、
+   PNG 健全性（魔数，含指针/虚线场景）、指针钳位警告、错误处理（非法规格必须以
+   退出码 1 失败）。
 
 ## 许可证
 
