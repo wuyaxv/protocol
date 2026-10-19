@@ -1,0 +1,362 @@
+/*
+ * protocol - A simple header generator for network protocols (C++ edition)
+ *
+ * Core layout engine. This is a faithful port of the layout algorithm of the
+ * original Python implementation by Luis MartinGarcia, extended so that every
+ * character cell carries a semantic Role (border, number, field label, field
+ * background, ...) which the SVG/PNG/ANSI renderers use for coloring.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ */
+#include "protocol.hpp"
+
+#include <algorithm>
+#include <cctype>
+
+namespace protocol {
+
+namespace {
+
+/** Splits a string exactly like Python's str.split(sep): empty input yields
+ *  one empty element; consecutive separators yield empty elements. */
+std::vector<std::string> split(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == sep) {
+            out.push_back(cur);
+            cur.clear();
+        } else {
+            cur += c;
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+
+std::string to_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+/** Parses an integer with the same acceptance rules as Python's int():
+ *  optional surrounding whitespace, optional sign, one or more digits. */
+int py_int(const std::string& raw, bool& ok) {
+    ok = false;
+    std::size_t b = raw.find_first_not_of(" \t\n\r\f\v");
+    if (b == std::string::npos) return 0;
+    std::size_t e = raw.find_last_not_of(" \t\n\r\f\v");
+    std::string s = raw.substr(b, e - b + 1);
+    std::size_t i = 0;
+    bool neg = false;
+    if (i < s.size() && (s[i] == '+' || s[i] == '-')) {
+        neg = (s[i] == '-');
+        ++i;
+    }
+    if (i >= s.size()) return 0;
+    long long v = 0;
+    for (; i < s.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(s[i]))) return 0;
+        v = v * 10 + (s[i] - '0');
+        if (v > 1000000000LL) return 0; // avoid overflow; diagrams never need this
+    }
+    ok = true;
+    return static_cast<int>(neg ? -v : v);
+}
+
+/** Centers a string exactly like Python's str.center(width) with space fill. */
+std::string py_center(const std::string& s, std::size_t width) {
+    if (s.size() >= width) return s;
+    std::size_t marg = width - s.size();
+    std::size_t left = marg / 2 + ((marg & width & 1U) ? 1U : 0U);
+    std::size_t right = marg - left;
+    return std::string(left, ' ') + s + std::string(right, ' ');
+}
+
+void push_char(std::vector<Cell>& row, char ch, Role role, int field) {
+    row.push_back(Cell{ch, role, field});
+}
+
+void push_spaces(std::vector<Cell>& row, long count, Role role, int field) {
+    for (long i = 0; i < count; ++i) row.push_back(Cell{' ', role, field});
+}
+
+/** Appends a centered field label to a row. The label characters are tagged
+ *  FieldText; the padding whitespace is tagged FieldBg (both for field p). */
+void push_centered_field(std::vector<Cell>& row, const std::string& text, long width, int p) {
+    std::string centered = py_center(text, static_cast<std::size_t>(std::max(0L, width)));
+    for (char c : centered) {
+        // Whitespace introduced by centering is field background; real label
+        // characters are field text. (Labels never contain leading/trailing
+        // spaces in practice; borders are handled separately anyway.)
+        Role r = (c == ' ') ? Role::FieldBg : Role::FieldText;
+        row.push_back(Cell{c, r, p});
+    }
+}
+
+} // namespace
+
+void Protocol::parse_spec(const std::string& spec) {
+    std::string fields_part = spec;
+    std::string opts_part;
+    bool has_opts = false;
+
+    std::size_t qpos = spec.find('?');
+    if (qpos != std::string::npos) {
+        if (spec.find('?', qpos + 1) != std::string::npos)
+            throw ProtocolException("FATAL: Character '?' may only be used as an option separator.");
+        fields_part = spec.substr(0, qpos);
+        opts_part = spec.substr(qpos + 1);
+        has_opts = true;
+    }
+
+    // Parse field spec
+    for (const std::string& item : split(fields_part, ',')) {
+        std::vector<std::string> parts = split(item, ':');
+        if (parts.size() != 2)
+            throw ProtocolException("FATAL: Invalid field_list specification (" + spec + ")");
+        bool ok = false;
+        int bits = py_int(parts[1], ok);
+        if (!ok)
+            throw ProtocolException("FATAL: Invalid field_list specification (" + spec + ")");
+        if (bits <= 0)
+            throw ProtocolException("FATAL: Fields must be at least one bit long (" + spec + ")");
+        field_list_.push_back(Field{parts[0], bits, false, static_cast<int>(field_list_.size())});
+    }
+
+    // Parse options
+    if (has_opts) {
+        for (const std::string& opt : split(opts_part, ',')) {
+            std::vector<std::string> kv = split(opt, '=');
+            if (kv.size() != 2)
+                throw ProtocolException("FATAL: Invalid options specification (" + opt + ")");
+            std::string var = to_lower(kv[0]);
+            const std::string& value = kv[1];
+            if (var == "bits") {
+                bool ok = false;
+                int b = py_int(value, ok);
+                if (!ok)
+                    throw ProtocolException("FATAL: Invalid options specification (" + opt + ")");
+                if (b <= 0)
+                    throw ProtocolException("FATAL: Invalid value for 'bits' option (" + value + ")");
+                bits_per_line = b;
+            } else if (var == "numbers") {
+                std::string v = to_lower(value);
+                if (v == "0" || v == "n" || v == "no" || v == "none" || v == "false") {
+                    do_print_top_tens = false;
+                    do_print_top_units = false;
+                } else if (v == "1" || v == "y" || v == "yes" || v == "true") {
+                    do_print_top_tens = true;
+                    do_print_top_units = true;
+                } else {
+                    throw ProtocolException("FATAL: Invalid value for 'numbers' option (" + value + ")");
+                }
+            } else if (var == "oddchar" || var == "evenchar" || var == "startchar" ||
+                       var == "endchar" || var == "sepchar") {
+                if (value.size() != 1)
+                    throw ProtocolException("FATAL: Invalid value for '" + var + "' option (" + value + ")");
+                if (var == "oddchar") hdr_char_fill_odd = value[0];
+                else if (var == "evenchar") hdr_char_fill_even = value[0];
+                else if (var == "startchar") hdr_char_start = value[0];
+                else if (var == "endchar") hdr_char_end = value[0];
+                else hdr_char_sep = value[0];
+            }
+            // Unknown options are silently ignored (same as the original tool).
+        }
+    }
+}
+
+std::vector<Protocol::Field> Protocol::process_field_list() const {
+    std::vector<Field> fields = field_list_; // work on a copy
+    std::vector<Field> new_fields;
+    int bits_in_line = 0;
+    std::size_t i = 0;
+    while (i < fields.size()) {
+        Field& field = fields[i];
+        std::string field_text = field.text;
+        int field_len = field.len;
+        field.mf = false;
+
+        int available_in_line = bits_per_line - bits_in_line;
+
+        // If we have enough space on this line for the field, keep it as is.
+        if (available_in_line >= field_len) {
+            new_fields.push_back(field);
+            bits_in_line += field_len;
+            ++i;
+            if (bits_in_line == bits_per_line) bits_in_line = 0;
+        } else {
+            // Case 1: perfectly aligned field whose length is a multiple of
+            // the line length.
+            if (bits_in_line == 0 && field_len % bits_per_line == 0) {
+                new_fields.push_back(field);
+                ++i;
+                bits_in_line = 0;
+            } else {
+                // Case 2: split the field into two fragments.
+                if (available_in_line >= field_len - available_in_line) {
+                    new_fields.push_back(Field{field_text, available_in_line, true, field.id});
+                    field.text = "";
+                    field.len = field_len - available_in_line;
+                    field.mf = false;
+                } else {
+                    new_fields.push_back(Field{"", available_in_line, true, field.id});
+                    field.text = field_text;
+                    field.len = field_len - available_in_line;
+                    field.mf = false;
+                }
+                bits_in_line = 0;
+                continue;
+            }
+        }
+    }
+    return new_fields;
+}
+
+Grid Protocol::layout() const {
+    std::vector<Field> proto_fields = process_field_list();
+    Grid grid;
+
+    // Top bit-number rows.
+    if (do_print_top_tens) {
+        std::vector<Cell> row;
+        for (int i = 0; i < bits_per_line; ++i) {
+            std::string s = std::to_string(i);
+            push_char(row, ' ', Role::NumTen, -1);
+            push_char(row, (i % 10 == 0) ? s.front() : ' ', Role::NumTen, -1);
+        }
+        grid.rows.push_back(std::move(row));
+    }
+    if (do_print_top_units) {
+        std::vector<Cell> row;
+        for (int i = 0; i < bits_per_line; ++i) {
+            std::string s = std::to_string(i);
+            push_char(row, ' ', Role::NumUnit, -1);
+            push_char(row, s.back(), Role::NumUnit, -1);
+        }
+        grid.rows.push_back(std::move(row));
+    }
+
+    // Helper that produces the horizontal border line covering `width` bits.
+    auto horizontal = [&](int width) {
+        std::vector<Cell> row;
+        if (width <= 0) return row;
+        push_char(row, hdr_char_start, Role::Border, -1);
+        for (int i = 0; i < width - 1; ++i) {
+            push_char(row, hdr_char_fill_even, Role::Border, -1);
+            push_char(row, hdr_char_fill_odd, Role::Border, -1);
+        }
+        push_char(row, hdr_char_fill_even, Role::Border, -1);
+        push_char(row, hdr_char_end, Role::Border, -1);
+        return row;
+    };
+
+    grid.rows.push_back(horizontal(bits_per_line));
+
+    // Print all protocol fields.
+    int bits_in_line = 0;
+    std::vector<Cell> current_line;
+    std::size_t fields_done = 0;
+    for (std::size_t p = 0; p < proto_fields.size(); ++p) {
+        std::string field_text = proto_fields[p].text;
+        int field_len = proto_fields[p].len;
+        bool field_mf = proto_fields[p].mf;
+        int field_id = proto_fields[p].id;
+
+        // Truncate the label if it is too long, ending it with a dot.
+        if (static_cast<long>(field_text.size()) > static_cast<long>(field_len) * 2 - 1) {
+            field_text = field_text.substr(0, static_cast<std::size_t>(field_len * 2 - 1));
+            if (field_text.size() > 1)
+                field_text = field_text.substr(0, field_text.size() - 1) + ".";
+        }
+
+        if (bits_per_line - bits_in_line >= field_len) {
+            // The whole field fits in the current line.
+            if (bits_in_line == 0) push_char(current_line, hdr_char_sep, Role::Border, -1);
+
+            push_centered_field(current_line, field_text, field_len * 2L - 1, field_id);
+
+            bits_in_line += field_len;
+            ++fields_done;
+
+            if (bits_in_line == bits_per_line) {
+                push_char(current_line, hdr_char_sep, Role::Border, -1);
+                grid.rows.push_back(current_line);
+                current_line.clear();
+                bits_in_line = 0;
+                // When a field is fragmented we may need to suppress the
+                // floor of the field so the current line connects with the
+                // one that follows.
+                if (field_mf && p + 1 < proto_fields.size() &&
+                    proto_fields[p + 1].len > bits_per_line - field_len) {
+                    std::vector<Cell> merged;
+                    // Border covering the previous fields on this line.
+                    std::vector<Cell> left = horizontal(bits_per_line - field_len);
+                    if (left.empty()) push_char(merged, hdr_char_start, Role::Border, -1);
+                    else merged = std::move(left);
+
+                    if (proto_fields[p + 1].len >= bits_per_line) {
+                        // The next field reaches the end of its line.
+                        push_spaces(merged, 2L * field_len - 1, Role::FieldBg, proto_fields[p + 1].id);
+                        push_char(merged, hdr_char_end, Role::Border, -1);
+                    } else {
+                        // The next field only covers part of the space.
+                        long inner = 2L * (proto_fields[p + 1].len - (bits_per_line - field_len)) - 1;
+                        push_spaces(merged, inner, Role::FieldBg, proto_fields[p + 1].id);
+                        std::vector<Cell> right = horizontal(bits_per_line - proto_fields[p + 1].len);
+                        for (const Cell& c : right) merged.push_back(c);
+                    }
+                    grid.rows.push_back(std::move(merged));
+                } else {
+                    grid.rows.push_back(horizontal(bits_per_line));
+                }
+            } else if (fields_done == proto_fields.size()) {
+                push_char(current_line, hdr_char_sep, Role::Border, -1);
+                grid.rows.push_back(current_line);
+                grid.rows.push_back(horizontal(bits_in_line));
+            } else {
+                push_char(current_line, hdr_char_sep, Role::Border, -1);
+            }
+        } else {
+            // The field does not fit in the current line. We must be at the
+            // beginning of a fresh line with a length that is a multiple of
+            // the number of bits per line (process_field_list guarantees it).
+            if (bits_in_line == 0 && bits_per_line > 0 && field_len % bits_per_line == 0) {
+                int lines_to_print = (field_len / bits_per_line) * 2 - 1;
+                int central_line = lines_to_print / 2;
+                for (int i = 0; i < lines_to_print; ++i) {
+                    char start_line = (i % 2 == 1) ? hdr_char_start : hdr_char_sep;
+                    char end_line = (i % 2 == 1) ? hdr_char_end : hdr_char_sep;
+                    std::vector<Cell> row;
+                    push_char(row, start_line, Role::Border, -1);
+                    if (i == central_line)
+                        push_centered_field(row, field_text, bits_per_line * 2L - 1, field_id);
+                    else
+                        push_spaces(row, bits_per_line * 2L - 1, Role::FieldBg, field_id);
+                    push_char(row, end_line, Role::Border, -1);
+                    grid.rows.push_back(std::move(row));
+                    if (i == lines_to_print - 1)
+                        grid.rows.push_back(horizontal(bits_per_line));
+                }
+            }
+            // Any other case is impossible after process_field_list().
+        }
+    }
+
+    return grid;
+}
+
+std::string Protocol::to_string() const {
+    Grid grid = layout();
+    std::string out;
+    for (std::size_t r = 0; r < grid.rows.size(); ++r) {
+        for (const Cell& c : grid.rows[r]) out += c.ch;
+        if (r + 1 < grid.rows.size()) out += '\n';
+    }
+    return out;
+}
+
+} // namespace protocol
